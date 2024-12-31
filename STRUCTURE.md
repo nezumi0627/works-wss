@@ -2,23 +2,33 @@
 
 ## プロジェクト概要
 
-```mermaid mindmap
-root((Works MQTT))
-  コア実装
-    WebSocket接続
-    メッセージ処理
-    自動再接続
-  データ定義
-    メッセージ型
-    パケット構造
-    モデル
-  設定管理
-    定数
-    例外
-    ログ
-  データ
-    認証情報
-    ログファイル
+```mermaid
+graph TD
+    root((Works MQTT))
+    core[コア実装]
+    data[データ定義]
+    config[設定管理]
+    files[データ]
+
+    root --> core
+    root --> data
+    root --> config
+    root --> files
+
+    core --> ws[WebSocket接続]
+    core --> msg[メッセージ処理]
+    core --> reconnect[自動再接続]
+
+    data --> msgtype[メッセージ型]
+    data --> packet[パケット構造]
+    data --> model[モデル]
+
+    config --> const[定数]
+    config --> exc[例外]
+    config --> log[ログ]
+
+    files --> auth[認証情報]
+    files --> logfile[ログファイル]
 ```
 
 ## コアモジュール
