@@ -3,32 +3,32 @@
 ## プロジェクト概要
 
 ```mermaid
-graph TD
-    root((Works MQTT))
-    core[コア実装]
-    data[データ定義]
-    config[設定管理]
-    files[データ]
+graph TD;
+    root((Works MQTT));
+    core[コア実装];
+    data[データ定義];
+    config[設定管理];
+    files[データ];
 
-    root --> core
-    root --> data
-    root --> config
-    root --> files
+    root-->core;
+    root-->data;
+    root-->config;
+    root-->files;
 
-    core --> ws[WebSocket接続]
-    core --> msg[メッセージ処理]
-    core --> reconnect[自動再接続]
+    core-->ws[WebSocket接続];
+    core-->msg[メッセージ処理];
+    core-->reconnect[自動再接続];
 
-    data --> msgtype[メッセージ型]
-    data --> packet[パケット構造]
-    data --> model[モデル]
+    data-->msgtype[メッセージ型];
+    data-->packet[パケット構造];
+    data-->model[モデル];
 
-    config --> const[定数]
-    config --> exc[例外]
-    config --> log[ログ]
+    config-->const[定数];
+    config-->exc[例外];
+    config-->log[ログ];
 
-    files --> auth[認証情報]
-    files --> logfile[ログファイル]
+    files-->auth[認証情報];
+    files-->logfile[ログファイル];
 ```
 
 ## コアモジュール
@@ -142,37 +142,39 @@ graph TD
 
 ### 依存関係
 
-```mermaid graph LR
-A[wmqtt.py] --> B[constants.py]
-A --> C[exceptions.py]
-A --> D[logging_config.py]
-A --> E[message_types.py]
-A --> F[models.py]
-A --> G[mqtt_packet.py]
-A --> H[sticker_types.py]
-F --> E
-H --> E
+```mermaid
+graph LR;
+    A[wmqtt.py]-->B[constants.py];
+    A-->C[exceptions.py];
+    A-->D[logging_config.py];
+    A-->E[message_types.py];
+    A-->F[models.py];
+    A-->G[mqtt_packet.py];
+    A-->H[sticker_types.py];
+    F-->E;
+    H-->E;
 ```
 
 ### 処理フロー
 
-```mermaid sequenceDiagram
-    participant Client as WMQTTClient
-    participant WebSocket
-    participant MQTT as MQTTService
+```mermaid
+sequenceDiagram;
+    participant Client as WMQTTClient;
+    participant WebSocket;
+    participant MQTT as MQTTService;
 
-    Client->>WebSocket: WebSocket接続
-    WebSocket-->>Client: 接続確立
-    Client->>MQTT: CONNECT
-    MQTT-->>Client: CONNACK
+    Client->>WebSocket: WebSocket接続;
+    WebSocket-->>Client: 接続確立;
+    Client->>MQTT: CONNECT;
+    MQTT-->>Client: CONNACK;
 
     loop キープアライブ
-        Client->>MQTT: PINGREQ
-        MQTT-->>Client: PINGRESP
+        Client->>MQTT: PINGREQ;
+        MQTT-->>Client: PINGRESP;
     end
 
-    MQTT->>Client: PUBLISH
-    Client->>MQTT: PUBACK
+    MQTT->>Client: PUBLISH;
+    Client->>MQTT: PUBACK;
 
-    Note over Client: メッセージ処理
+    Note over Client: メッセージ処理;
 ```
