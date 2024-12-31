@@ -9,6 +9,12 @@ WebSocketを模倣し、通信を受け取るPythonクライアントの開発�
 > **Note**:
 > Cookieは、ブラウザの開発者ツール(F12)でメッセージ送信時(sendMessage)などの通信を確認し、そこで使用されているものを利用してください。
 
+> **Note**: WMQTTの仕様により、同一メッセージが複数回帰ってくる場合があります。
+> メッセージの重複を防ぐための工夫として、以下のIDをキーとして使用できます:
+>
+> - `notification-id`: 通知メッセージのユニークID
+>   例:`msg.AAAAAAAAAABThVMSAAAAAJ4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`
+
 ## TODO
 
 - メッセージタイプの定義の拡張

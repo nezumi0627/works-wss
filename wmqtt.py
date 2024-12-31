@@ -224,9 +224,22 @@ class WMQTTClient:
     async def connect(self) -> None:
         """WebSocket接続を確立し、MQTTセッションを開始します."""
         try:
-            logger.info(f"接続開始: {self.ws_config.url}")
+            logger.info("-" * 50)
+            logger.info("WebSocket接続を開始します")
+            logger.info(f"接続先: {self.ws_config.url}")
+            logger.info(f"プロトコル: {self.ws_config.subprotocol}")
+            logger.debug(f"Origin: {self.ws_config.origin}")
+            logger.debug(f"User-Agent: {self.ws_config.user_agent}")
+            logger.debug("Cookie情報:")
+            for cookie in self.cookies.split("; "):
+                if any(
+                    k in cookie.lower()
+                    for k in ["session", "token", "user", "login"]
+                ):
+                    logger.debug(f"  {cookie}")
+
             self.state = StatusFlag.CONNECTING
-            logger.debug(f"状態: {self.state.name}")
+            logger.info(f"接続状態: {self.state.name}")
 
             self.ws = await websockets.connect(
                 self.ws_config.url,
@@ -235,12 +248,24 @@ class WMQTTClient:
                 subprotocols=[self.ws_config.subprotocol],
                 ping_interval=None,
             )
-            logger.info("WebSocket接続完了")
+            logger.info("WebSocket接続が確立されました")
+
+            logger.info("-" * 50)
+            logger.info("MQTT接続を開始します")
+            logger.debug(
+                f"プロトコルバージョン: {self.config.protocol_version}"
+            )
+            logger.debug(f"キープアライブ間隔: {self.config.keep_alive}秒")
+            logger.debug(f"PING送信間隔: {self.config.ping_interval}秒")
+            logger.debug(f"PING応答タイムアウト: {self.config.ping_timeout}秒")
+
             await self._mqtt_connect()
             self.state = StatusFlag.CONNECTED
-            logger.debug(f"状態: {self.state.name}")
+            logger.info(f"接続状態: {self.state.name}")
 
             self.current_retry = 0
+            logger.info("メッセージ監視を開始します")
+            logger.info("-" * 50)
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._start_keepalive())
@@ -248,7 +273,10 @@ class WMQTTClient:
 
         except websockets.exceptions.InvalidStatusCode as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error("-" * 50)
             logger.error(f"認証エラー: HTTP {err.status_code}")
+            logger.error(f"接続状態: {self.state.name}")
+            logger.error("-" * 50)
             raise AuthenticationError(
                 ERROR_MESSAGES["AUTHENTICATION_FAILED"].format(
                     reason=f"HTTP {err.status_code}"
@@ -256,7 +284,10 @@ class WMQTTClient:
             ) from err
         except websockets.exceptions.ConnectionClosed as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error("-" * 50)
             logger.error(f"切断: コード {err.code}, 理由: {err.reason}")
+            logger.error(f"接続状態: {self.state.name}")
+            logger.error("-" * 50)
             raise ConnectionError(
                 ERROR_MESSAGES["CONNECTION_CLOSED"].format(
                     code=err.code, reason=err.reason
@@ -268,7 +299,10 @@ class WMQTTClient:
             asyncio.CancelledError,
         ) as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error("-" * 50)
             logger.error(f"接続エラー: {err}")
+            logger.error(f"接続状態: {self.state.name}")
+            logger.error("-" * 50)
             raise ConnectionError(
                 ERROR_MESSAGES["CONNECTION_FAILED"].format(reason=str(err))
             ) from err
@@ -285,7 +319,8 @@ class WMQTTClient:
             username="dummy",
         )
 
-        logger.debug(f"CONNECT送信 (ID: {client_id})")
+        logger.debug(f"CONNECT送信 (クライアントID: {client_id})")
+        logger.debug(f"パケット: {packet.packet.hex(' ')}")
         await self.ws.send(cast(Data, packet.packet))
 
     async def listen(self) -> None:
@@ -294,7 +329,7 @@ class WMQTTClient:
             raise ConnectionError("WebSocket connection not established")
 
         try:
-            logger.info("メッセージ監視を開始します")
+            logger.info("メッセージ監視タスクを開始します")
             async for message in self.ws:
                 if isinstance(message, bytes):
                     await self._handle_binary_message(message)
@@ -305,7 +340,7 @@ class WMQTTClient:
         except websockets.exceptions.ConnectionClosed as err:
             logger.error(f"WebSocket接続が切断されました: {err}")
         except asyncio.CancelledError:
-            logger.info("メッセージ監視を終了します")
+            logger.info("メッセージ監視タスクを終了します")
             raise
 
     async def _handle_binary_message(self, data: bytes) -> None:
