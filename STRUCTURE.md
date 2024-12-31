@@ -1,5 +1,37 @@
 # Works MQTT WebSocket Client
 
+## ディレクトリ構造
+
+```
+works-wss/
+├── core/
+│   ├── __init__.py
+│   ├── constants.py
+│   ├── exceptions.py
+│   └── logging.py
+├── message/
+│   ├── __init__.py
+│   ├── models.py
+│   ├── parser.py
+│   └── types.py
+├── mqtt/
+│   ├── packet/
+│   │   ├── __init__.py
+│   │   ├── base.py
+│   │   ├── builder.py
+│   │   ├── parser.py
+│   │   └── types.py
+│   └── __init__.py
+├── wmqtt.py
+├── STRUCTURE.md
+├── README.md
+├── LICENSE
+├── .gitignore
+├── cookie.json
+├── works_mqtt.log
+└── pyproject.toml
+```
+
 ## プロジェクト概要
 
 ```mermaid
@@ -18,10 +50,12 @@ graph TD;
     core-->ws[WebSocket接続];
     core-->msg[メッセージ処理];
     core-->reconnect[自動再接続];
+    core-->display[表示処理];
 
     data-->msgtype[メッセージ型];
     data-->packet[パケット構造];
     data-->model[モデル];
+    data-->sticker[スタンプ処理];
 
     config-->const[定数];
     config-->exc[例外];
@@ -40,6 +74,9 @@ graph TD;
 - WebSocket接続の確立と維持
 - メッセージの送受信処理
 - 自動再接続メカニズム
+- リッチな表示処理
+- 重複メッセージの検出と処理
+- スタンプ情報の解析と表示
 
 #### クラス構成
 
@@ -48,11 +85,10 @@ graph TD;
 | `WMQTTClient`     | WebSocketクライアントの中核 |
 | `MQTTConfig`      | MQTT接続パラメータ          |
 | `WebSocketConfig` | WebSocket接続設定           |
-| `StatusFlag`      | ユーザーステータス管理      |
 
 ## データ定義モジュール
 
-### message_types.py - メッセージ定義
+### message/types.py - メッセージ定義
 
 #### 列挙型
 
@@ -60,33 +96,47 @@ graph TD;
 | ------------- | ---------------------- |
 | `MessageType` | メッセージの種類を定義 |
 | `ChannelType` | チャンネルの種類を定義 |
+| `StickerType` | スタンプの種類を定義   |
 
-### mqtt_packet.py - パケット構造
+#### データクラス
+
+| クラス名      | 説明               |
+| ------------- | ------------------ |
+| `StickerInfo` | スタンプ情報の管理 |
+
+### message/parser.py - メッセージ解析
+
+| 関数名          | 説明                   |
+| --------------- | ---------------------- |
+| `parse_message` | メッセージデータの解析 |
+
+### mqtt/packet - パケット構造
 
 #### クラス構成
 
-| クラス名          | 説明                 |
-| ----------------- | -------------------- |
-| `MQTTPacket`      | パケットの生成と処理 |
-| `MQTTHeader`      | ヘッダー情報の管理   |
-| `MQTTMessageType` | パケットタイプの定義 |
+| クラス名     | 説明                 |
+| ------------ | -------------------- |
+| `MQTTPacket` | パケットの基本構造   |
+| `PacketType` | パケットタイプの定義 |
 
-### models.py - データモデル
+#### 主要機能
+
+| モジュール   | 説明                 |
+| ------------ | -------------------- |
+| `base.py`    | パケット基本クラス   |
+| `builder.py` | パケット生成機能     |
+| `parser.py`  | パケット解析機能     |
+| `types.py`   | パケット関連の型定義 |
+
+### message/models.py - データモデル
 
 | クラス名       | 説明                         |
 | -------------- | ---------------------------- |
 | `WorksMessage` | メッセージ構造とシリアライズ |
 
-### sticker_types.py - スタンプ定義
-
-| クラス名      | 説明                     |
-| ------------- | ------------------------ |
-| `StickerType` | スタンプの種類の定義     |
-| `StickerInfo` | スタンプのメタデータ管理 |
-
 ## 設定モジュール
 
-### constants.py - 定数定義
+### core/constants.py - 定数定義
 
 #### 設定グループ
 
@@ -96,7 +146,7 @@ graph TD;
 | MQTT設定       | タイムアウト、リトライ間隔 |
 | メッセージ定義 | フィールド、フォーマット   |
 
-### exceptions.py - 例外定義
+### core/exceptions.py - 例外定義
 
 #### 例外階層
 
@@ -110,15 +160,16 @@ graph TD;
 | `PacketError`         | パケット処理エラー   |
 | `CookieError`         | クッキー関連エラー   |
 
-### logging_config.py - ログ設定
+### core/logging.py - ログ設定
 
 #### 設定内容
 
-| 項目           | 説明                 |
-| -------------- | -------------------- |
-| ログレベル     | ログの重要度管理     |
-| Rich設定       | 出力フォーマット設定 |
-| ローテーション | ログファイル管理設定 |
+| 項目           | 説明                       |
+| -------------- | -------------------------- |
+| ログレベル     | ログの重要度管理           |
+| Rich設定       | 出力フォーマット設定       |
+| パネル表示     | 構造化されたメッセージ表示 |
+| ローテーション | ログファイル管理設定       |
 
 ## データファイル
 
@@ -137,6 +188,7 @@ graph TD;
 - デバッグ情報
 - エラー情報
 - メッセージ履歴
+- パケット解析情報
 
 ## システム構成
 
@@ -144,14 +196,15 @@ graph TD;
 
 ```mermaid
 graph LR;
-    A[wmqtt.py]-->B[constants.py];
-    A-->C[exceptions.py];
-    A-->D[logging_config.py];
-    A-->E[message_types.py];
-    A-->F[models.py];
-    A-->G[mqtt_packet.py];
-    A-->H[sticker_types.py];
+    A[wmqtt.py]-->B[core/constants.py];
+    A-->C[core/exceptions.py];
+    A-->D[core/logging.py];
+    A-->E[message/types.py];
+    A-->F[message/models.py];
+    A-->G[message/parser.py];
+    A-->H[mqtt/packet];
     F-->E;
+    G-->E;
     H-->E;
 ```
 
@@ -162,6 +215,8 @@ sequenceDiagram;
     participant Client as WMQTTClient;
     participant WebSocket;
     participant MQTT as MQTTService;
+    participant Parser as MessageParser;
+    participant Display as RichDisplay;
 
     Client->>WebSocket: WebSocket接続;
     WebSocket-->>Client: 接続確立;
@@ -174,7 +229,12 @@ sequenceDiagram;
     end
 
     MQTT->>Client: PUBLISH;
+    Client->>Parser: パケット解析;
+    Parser-->>Client: 解析結果;
+    Client->>Display: メッセージ表示;
+    Note over Client,Display: スタンプ情報の解析と表示;
     Client->>MQTT: PUBACK;
 
+    Note over Client: 重複メッセージの検出;
     Note over Client: メッセージ処理;
 ```
