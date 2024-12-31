@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, Optional, cast
 
 import websockets
+from websockets.client import WebSocketClientProtocol
 from websockets.typing import Data, Subprotocol
 
 from constants import (
@@ -180,7 +181,7 @@ class WMQTTClient:
         self.running = True
         self.current_retry = 0
         self.message_id = 0
-        self.ws: Optional[websockets.WebSocketClientProtocol] = None
+        self.ws: Optional[WebSocketClientProtocol] = None
         self._pending_messages: Dict[int, asyncio.Future] = {}
 
     def _load_cookies(self) -> str:
@@ -298,6 +299,9 @@ class WMQTTClient:
 
     async def _mqtt_connect(self) -> None:
         """MQTT接続を確立します."""
+        if not self.ws:
+            raise ConnectionError("WebSocket connection not established")
+
         client_id = f"web-beejs_{uuid.uuid4().hex[:12]}"
         connect_packet = MQTTPacket.create_connect(
             client_id=client_id,
@@ -310,6 +314,9 @@ class WMQTTClient:
 
     async def listen(self) -> None:
         """受信メッセージを監視します."""
+        if not self.ws:
+            raise ConnectionError("WebSocket connection not established")
+
         try:
             async for message in self.ws:
                 if isinstance(message, bytes):
@@ -366,6 +373,9 @@ class WMQTTClient:
         self, packet: MQTTPacket, message_id: Optional[int]
     ) -> None:
         """QoS処理を行います."""
+        if not self.ws:
+            raise ConnectionError("WebSocket connection not established")
+
         if packet.header.qos_level > 0 and message_id is not None:
             puback = MQTTPacket.create_puback(message_id)
             await self.ws.send(cast(Data, puback.to_bytes()))
@@ -588,6 +598,9 @@ class WMQTTClient:
 
     async def _send_pingreq(self) -> None:
         """MQTT PINGREQパケットを送信します."""
+        if not self.ws:
+            raise ConnectionError("WebSocket connection not established")
+
         try:
             pingreq_packet = MQTTPacket.create_pingreq()
             await self.ws.send(cast(Data, pingreq_packet.to_bytes()))
