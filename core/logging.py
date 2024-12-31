@@ -1,107 +1,115 @@
 """Logging configuration.
 
-ロギング設定を提供するモジュール。
-主な機能:
-- ファイルとコンソールへのログ出力
-- MQTTパケットのログ記録
-- エラー情報のログ記録
+ロギ設定を提供するモジュール。
+シンプルでクリーンなログ出力を実現します。
 """
 
-import json
 import logging
-import sys
-from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.theme import Theme
 
-# ログ設定
-LOG_CONFIG = {
-    "file": Path("works_mqtt.log"),
-    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    "level": logging.DEBUG,
-}
+# ログファイルのパス
+LOG_FILE = "works_mqtt.log"
+
+# カスタムテーマの定義
+THEME = Theme(
+    {
+        "info": "bright_blue",
+        "warning": "yellow",
+        "error": "red bold",
+        "debug": "dim white",
+        "success": "green",
+        "notice": "magenta",
+    }
+)
+
+# コンソールの設定
+console = Console(theme=THEME)
 
 
-def setup_logger() -> logging.Logger:
-    """ロガーの初期設定を行う.
+def setup_logging(level: int = logging.INFO) -> None:
+    """ロギングの設定をします.
 
-    Returns:
-        logging.Logger: 設定済みのロガーインスタンス
+    Args:
+        level: ログレベル。デフォルトはINFO。
     """
-    logger = logging.getLogger("works_mqtt")
-    logger.setLevel(LOG_CONFIG["level"])
+    # ログフォーマットの設定
+    log_format = "%(message)s"
+    date_format = "%H:%M:%S"
 
-    # ファイルハンドラーの設定
-    file_handler = logging.FileHandler(LOG_CONFIG["file"], encoding="utf-8")
-    file_handler.setLevel(LOG_CONFIG["level"])
-    file_handler.setFormatter(logging.Formatter(LOG_CONFIG["format"]))
-    logger.addHandler(file_handler)
-
-    # コンソールハンドラーの設定
-    console = Console(color_system="auto")
-    console_handler = RichHandler(
-        console=console,
-        show_time=False,
-        show_path=False,
-        markup=True,
-        rich_tracebacks=True,
+    # ファイルハンドラの設定
+    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s [%(levelname)8s] %(message)s",
+            datefmt=date_format,
+        )
     )
-    console_handler.setLevel(LOG_CONFIG["level"])
-    logger.addHandler(console_handler)
 
-    # 標準出力のリダイレクト
-    sys.stdout = console.file
-    sys.stderr = console.file
+    # WebSocketのデバッグログをフィルタリング
+    class WebSocketFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            return not (
+                msg.startswith(("= connection", "> ", "< "))
+                or "BINARY" in msg
+                or "Received message:" in msg
+            )
 
-    return logger
+    # Richハンドラの設定
+    rich_handler = RichHandler(
+        console=console,
+        show_time=True,
+        show_path=False,
+        rich_tracebacks=True,
+        tracebacks_show_locals=True,
+        omit_repeated_times=True,
+        show_level=True,
+        keywords=[],
+        markup=True,
+        highlighter=None,
+    )
+    rich_handler.setFormatter(logging.Formatter(log_format))
+    rich_handler.addFilter(WebSocketFilter())
+    file_handler.addFilter(WebSocketFilter())
+
+    # ルートロガーの設定
+    logging.basicConfig(
+        level=level,
+        format=log_format,
+        datefmt=date_format,
+        handlers=[rich_handler, file_handler],
+        force=True,
+    )
 
 
-# ロガーのグローバルインスタンス
-logger = setup_logger()
+# ロガーの取得
+logger = logging.getLogger("works_mqtt")
 
 
-def log_packet(
-    packet_type: str,
-    packet_data: Union[bytes, Dict[str, Any]],
-    direction: str = ">>",
-    level: int = logging.DEBUG,
-) -> None:
-    """MQTTパケットをログに記録する.
+def log_packet(packet_type: str, data: bytes, direction: str = ">>") -> None:
+    """パケット情報をログに記録します.
 
     Args:
-        packet_type (str): パケットの種類
-        packet_data (Union[bytes, Dict[str, Any]]): パケットのデータ
-            （バイト列または辞書）
-        direction (str, optional): パケットの方向（>> = 送信、<< = 受信）.
-            デフォルトは">>"
-        level (int, optional): ログレベル. デフォルトはDEBUG
+        packet_type: パケットの種類
+        data: パケットデータ
+        direction: 通信の方向（>> or <<）
     """
-    if isinstance(packet_data, bytes):
-        hex_data = " ".join(f"{b:02x}" for b in packet_data)
-        logger.log(level, f"{direction} {packet_type}: {hex_data}")
-    else:
-        json_data = json.dumps(packet_data, ensure_ascii=False, indent=2)
-        logger.log(level, f"{direction} {packet_type}:\n{json_data}")
+    if logger.getEffectiveLevel() <= logging.DEBUG:
+        hex_data = data.hex(" ")[:32]  # 最初の32バイトのみ表示
+        if len(data) > 16:
+            hex_data += "..."
+        logger.debug(f"{direction} {packet_type}: {hex_data}")
 
 
-def log_error(
-    error_code: str,
-    detail: Optional[Dict[str, Any]] = None,
-    level: int = logging.ERROR,
-) -> None:
-    """エラー情報をログに記録する.
+def log_error(error_type: str, context: Dict[str, Any]) -> None:
+    """エラー情報をログに記録します.
 
     Args:
-        error_code (str): エラーコード
-        detail (Optional[Dict[str, Any]], optional): エラーの詳細情報.
-            デフォルトはNone
-        level (int, optional): ログレベル. デフォルトはERROR
+        error_type: エラーの種類
+        context: エラーのコンテキスト情報
     """
-    from .exceptions import ERROR_MESSAGES
-
-    error_msg = ERROR_MESSAGES.get(error_code, "Unknown error: {detail}")
-    if detail:
-        error_msg = error_msg.format(**detail)
-    logger.log(level, error_msg)
+    logger.error(f"{error_type}: {context}")

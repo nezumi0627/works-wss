@@ -15,17 +15,12 @@ import asyncio
 import json
 import logging
 import ssl
-import struct
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, cast
+from typing import Dict, Optional, cast
 
 import websockets
-from rich.box import ROUNDED
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 from websockets.client import WebSocketClientProtocol
 from websockets.typing import Data, Subprotocol
 
@@ -44,16 +39,14 @@ from core import (
     AuthenticationError,
     ConnectionError,
     CookieError,
-    MessageError,
     PacketError,
     StatusFlag,
-    log_packet,
     logger,
 )
+from core.logging import setup_logging
 from message import (
     MessageType,
     StickerInfo,
-    StickerType,
     WorksMessage,
     get_channel_type_name,
     get_message_type_name,
@@ -69,7 +62,6 @@ from mqtt import (
     parse_packet,
 )
 from mqtt.packet.parser import (
-    analyze_packet,
     parse_packet,
     parse_publish,
 )
@@ -169,7 +161,6 @@ class WMQTTClient:
         # 重複チェックの有効期限（秒）
         self._message_expiry = 60.0
         self.state = StatusFlag.DISCONNECTED
-        self.console = Console()
 
     def _load_cookies(self) -> str:
         """クッキーファイルを読み込みます.
@@ -217,33 +208,26 @@ class WMQTTClient:
                         )
                     )
                     logger.info(
-                        f"Attempting reconnection... "
+                        f"再接続を試みます... "
                         f"({self.current_retry}/{self.config.max_retries})"
                     )
                     # Exponential backoff for retry delay
                     retry_delay = self.config.retry_interval * (
                         2 ** (self.current_retry - 1)
                     )
-                    logger.info(f"Wait time: {retry_delay} seconds")
+                    logger.info(f"待機時間: {retry_delay}秒")
                     await asyncio.sleep(retry_delay)
                 else:
                     logger.error(ERROR_MESSAGES["MAX_RETRIES_EXCEEDED"])
                     break
 
     async def connect(self) -> None:
-        """WebSocket接続を確立し、MQTTセッションを開始します.
-
-        Raises:
-            AuthenticationError: 認証に失敗した場合
-            ConnectionError: 接続に失敗した場合
-        """
+        """WebSocket接続を確立し、MQTTセッションを開始します."""
         try:
-            logger.debug("Starting WebSocket connection...")
-            logger.debug(f"URL: {self.ws_config.url}")
-            logger.debug(f"Origin: {self.ws_config.origin}")
-            logger.debug(f"Protocol: {self.ws_config.subprotocol}")
-
+            logger.info(f"接続開始: {self.ws_config.url}")
             self.state = StatusFlag.CONNECTING
+            logger.debug(f"状態: {self.state.name}")
+
             self.ws = await websockets.connect(
                 self.ws_config.url,
                 ssl=ssl.create_default_context(),
@@ -251,20 +235,20 @@ class WMQTTClient:
                 subprotocols=[self.ws_config.subprotocol],
                 ping_interval=None,
             )
-            logger.info("WebSocket connection established successfully")
+            logger.info("WebSocket接続完了")
             await self._mqtt_connect()
             self.state = StatusFlag.CONNECTED
+            logger.debug(f"状態: {self.state.name}")
 
-            # Reset retry counter on successful connection
             self.current_retry = 0
 
-            # Start keepalive and message monitoring tasks
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(self._start_keepalive())
                 tg.create_task(self.listen())
 
         except websockets.exceptions.InvalidStatusCode as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error(f"認証エラー: HTTP {err.status_code}")
             raise AuthenticationError(
                 ERROR_MESSAGES["AUTHENTICATION_FAILED"].format(
                     reason=f"HTTP {err.status_code}"
@@ -272,6 +256,7 @@ class WMQTTClient:
             ) from err
         except websockets.exceptions.ConnectionClosed as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error(f"切断: コード {err.code}, 理由: {err.reason}")
             raise ConnectionError(
                 ERROR_MESSAGES["CONNECTION_CLOSED"].format(
                     code=err.code, reason=err.reason
@@ -283,10 +268,9 @@ class WMQTTClient:
             asyncio.CancelledError,
         ) as err:
             self.state = StatusFlag.DISCONNECTED
+            logger.error(f"接続エラー: {err}")
             raise ConnectionError(
-                ERROR_MESSAGES["CONNECTION_FAILED"].format(
-                    reason=f"{err.__class__.__name__}: {err}"
-                )
+                ERROR_MESSAGES["CONNECTION_FAILED"].format(reason=str(err))
             ) from err
 
     async def _mqtt_connect(self) -> None:
@@ -301,10 +285,8 @@ class WMQTTClient:
             username="dummy",
         )
 
-        # 送信前にパケットをログ出力
-        log_packet("CONNECT", packet.packet, "<<")
+        logger.debug(f"CONNECT送信 (ID: {client_id})")
         await self.ws.send(cast(Data, packet.packet))
-        logger.info("MQTT connection request sent")
 
     async def listen(self) -> None:
         """受信メッセージを監視します."""
@@ -312,15 +294,18 @@ class WMQTTClient:
             raise ConnectionError("WebSocket connection not established")
 
         try:
+            logger.info("メッセージ監視を開始します")
             async for message in self.ws:
                 if isinstance(message, bytes):
                     await self._handle_binary_message(message)
                 else:
-                    logger.warning(f"Non-binary message received: {message}")
+                    logger.warning(
+                        f"バイナリ以外のメッセージを受信: {message}"
+                    )
         except websockets.exceptions.ConnectionClosed as err:
-            logger.error(f"WebSocket connection closed: {err}")
+            logger.error(f"WebSocket接続が切断されました: {err}")
         except asyncio.CancelledError:
-            logger.info("Message monitoring task terminated")
+            logger.info("メッセージ監視を終了します")
             raise
 
     async def _handle_binary_message(self, data: bytes) -> None:
@@ -334,38 +319,186 @@ class WMQTTClient:
             if packet is None:
                 raise PacketError("パケットの解析に失敗しました")
 
-            # パケットの詳細な解析
-            packet_info = analyze_packet(packet)
-
-            # パケット情報をログに出力
-            if packet_info:
-                if "error" in packet_info:
-                    logger.error(f"パケット解析エラー: {packet_info['error']}")
-                else:
-                    self._log_packet_info(packet_info)
-
             # パケットを処理
             await self._process_packet(packet)
 
         except Exception as err:
-            raise PacketError(f"予期せぬエラー: {err}") from err
+            logger.error(f"パケット処理エラー: {err}")
 
-    def _is_duplicate_message(self, packet_info: dict[str, Any]) -> bool:
+    async def _process_packet(self, packet: MQTTPacket) -> None:
+        """MQTTパケットを処理します."""
+        try:
+            if packet.packet_type == PacketType.PUBLISH:
+                topic, payload, message_id = parse_publish(packet)
+                logger.debug(f"受信: {packet.packet_type.name}")
+                logger.debug(f"パケット: {packet.packet.hex(' ')}")
+
+                try:
+                    notification = json.loads(payload)
+                    logger.debug(
+                        f"データ: {json.dumps(notification, ensure_ascii=False)}"
+                    )
+
+                    # 重複チェック
+                    if self._is_duplicate_message(notification):
+                        return
+
+                    # メッセージを処理
+                    if message := parse_message(payload):
+                        await self._route_message(topic, message)
+
+                    await self._handle_qos(packet, message_id)
+                except json.JSONDecodeError as err:
+                    logger.error(f"JSONデコードエラー: {err}")
+
+            elif packet.packet_type == PacketType.CONNACK:
+                logger.info("MQTT接続完了")
+                logger.debug(f"パケット: {packet.packet.hex(' ')}")
+            elif packet.packet_type == PacketType.PINGRESP:
+                logger.debug("PING応答受信")
+                logger.debug(f"パケット: {packet.packet.hex(' ')}")
+            elif packet.packet_type == PacketType.SUBACK:
+                self._handle_suback(packet)
+                logger.debug(f"パケット: {packet.packet.hex(' ')}")
+
+        except Exception as err:
+            logger.error(f"パケット処理エラー: {err}")
+
+    async def _route_message(self, topic: str, message: WorksMessage) -> None:
+        """メッセージを適切なハンドラーにルーティングします."""
+        try:
+            if "nType" in message.body:
+                msg_type = message.body.get("nType", 0)
+                ch_type = message.body.get("chType", 0)
+                ch_title = message.body.get("chTitle", "")
+                status = message.body.get("sType", "不明")
+
+                # チャンネルタイプの取得
+                channel_type_name = get_channel_type_name(ch_type)
+                # メッセージタイプの取得
+                message_type_name = get_message_type_name(msg_type)
+
+                logger.info(
+                    f"通知: {ch_title} "
+                    f"({channel_type_name}, {message_type_name}, "
+                    f"ステータス: {status})"
+                )
+
+                # 詳細情報のログ出力
+                if msg_type == MessageType.NOTIFICATION_MESSAGE:
+                    logger.debug(
+                        f"メッセージ詳細: "
+                        f"送信者={message.body.get('loc-args0', '')}, "
+                        f"内容={message.body.get('loc-args1', '')}"
+                    )
+                elif msg_type == MessageType.NOTIFICATION_STICKER:
+                    try:
+                        extras = json.loads(message.body.get("extras", "{}"))
+                        sticker_info = StickerInfo(
+                            sticker_type=extras.get("stkType", "none"),
+                            package_id=extras.get("pkgId", ""),
+                            sticker_id=extras.get("stkId", ""),
+                            options=extras.get("stkOpt"),
+                        )
+                        logger.debug(
+                            f"スタンプ詳細: "
+                            f"タイプ={sticker_info.sticker_type}, "
+                            f"パッケージ={sticker_info.package_id}, "
+                            f"ID={sticker_info.sticker_id}"
+                        )
+                    except json.JSONDecodeError:
+                        logger.warning("スタンプ情報の解析に失敗しました")
+
+            elif message.command == MessageType.CMD_READ:
+                body = message.body
+                logger.info(
+                    f"既読通知: チャンネル {message.channel_id} "
+                    f"メッセージ #{body.get('msgSn')} "
+                    f"ユーザー {body.get('readerId')}"
+                )
+
+            elif "msgTypeCode" in message.body:
+                msg_type = message.body.get("msgTypeCode", 0)
+                ch_type = message.body.get("chType", 0)
+
+                # チャンネルタイプの取得
+                channel_type_name = get_channel_type_name(ch_type)
+                # メッセージタイプの取得
+                message_type_name = get_message_type_name(msg_type)
+
+                logger.info(
+                    f"メッセージ: チャンネル {message.channel_id} "
+                    f"({channel_type_name}, {message_type_name})"
+                )
+
+                # 特定のメッセージタイプに応じた詳細情報
+                if msg_type == MessageType.NORMAL:
+                    logger.debug(
+                        f"テキスト内容: {message.body.get('content', '')}"
+                    )
+                elif msg_type == MessageType.LEAVE:
+                    logger.debug(f"退出者: {message.body.get('userId', '')}")
+                elif msg_type == MessageType.INVITE:
+                    logger.debug(
+                        f"招待者: {message.body.get('inviter', '')}, "
+                        f"招待されたユーザー: {message.body.get('invitee', '')}"
+                    )
+
+        except Exception as err:
+            logger.error(f"メッセージルーティングエラー: {err}")
+
+    async def stop(self) -> None:
+        """クライアントを停止します."""
+        self.running = False
+        if self.ws:
+            try:
+                packet = build_disconnect_packet()
+                logger.debug("DISCONNECT送信")
+                await self.ws.send(cast(Data, packet.packet))
+                await self.ws.close()
+                self.state = StatusFlag.DISCONNECTED
+                logger.debug(f"状態: {self.state.name}")
+            except Exception as e:
+                logger.error(f"切断エラー: {e}")
+
+    async def _start_keepalive(self) -> None:
+        """定期的にキープアライブパケットを送信します."""
+        while self.running:
+            try:
+                await asyncio.sleep(self.config.ping_interval)
+                if self.ws and not self.ws.closed:
+                    await self._send_pingreq()
+            except (
+                websockets.exceptions.WebSocketException,
+                ConnectionError,
+                asyncio.CancelledError,
+            ) as e:
+                if not isinstance(e, asyncio.CancelledError):
+                    logger.error(f"キープアライブエラー: {e}")
+                break
+
+    async def _send_pingreq(self) -> None:
+        """MQTT PINGREQパケットを送信します."""
+        if not self.ws:
+            raise ConnectionError("WebSocket connection not established")
+
+        try:
+            packet = build_ping_packet()
+            logger.debug("PING送信")
+            logger.debug(f"パケット: {packet.packet.hex(' ')}")
+            await self.ws.send(cast(Data, packet.packet))
+        except Exception as e:
+            logger.error(f"PING送信エラー: {e}")
+
+    def _is_duplicate_message(self, payload: dict) -> bool:
         """メッセージが重複しているかチェックします.
 
         Args:
-            packet_info: パケット情報
+            payload: メッセージペイロード
 
         Returns:
             bool: 重複している場合はTrue
         """
-        if packet_info.get("type") != "PUBLISH":
-            return False
-
-        payload = packet_info.get("payload", {})
-        if not isinstance(payload, dict):
-            return False
-
         # メッセージキーを取得
         message_key = None
         if "notification-id" in payload:
@@ -397,225 +530,15 @@ class WMQTTClient:
         self._received_messages[message_key] = current_time
         return False
 
-    def _log_packet_info(self, packet_info: dict[str, Any]) -> None:
-        """パケット情報をログに出力します.
-
-        Args:
-            packet_info: パケット情報
-        """
-        # パケットタイプと基本情報を出力
-        packet_type = packet_info["type"]
-        flags = packet_info["flags"]
-        length = packet_info["length"]
-
-        # PUBLISHパケット以外の場合のみ基本情報を出力
-        if packet_type != "PUBLISH":
-            basic_info = (
-                f"パケット解析: {packet_type} "
-                f"(DUP: {flags['dup']}, QoS: {flags['qos']}, "
-                f"Retain: {flags['retain']}, Length: {length})"
-            )
-            logger.debug(basic_info)
-
-            # 生のパケットデータを16進数で表示
-            if raw_packet := packet_info.get("raw_packet"):
-                hex_dump = " ".join(f"{b:02x}" for b in raw_packet)
-                self.console.print(
-                    Panel(
-                        hex_dump,
-                        title="[bold cyan]Raw Packet Data[/bold cyan]",
-                        border_style="cyan",
-                        padding=(0, 1),
-                    )
-                )
-
-    def _create_notification_panel(self, payload: dict[str, Any]) -> None:
-        """通知メッセージのパネルを作成します.
-
-        Args:
-            payload: 通知メッセージのペイロード
-        """
-        notification_content = {
-            "Channel": payload.get("chTitle", ""),
-            "Channel Type": get_channel_type_name(payload.get("chType", 0)),
-            "Message Type": (
-                f"{payload.get('nType', 0)} "
-                f"({get_message_type_name(payload.get('nType', 0))})"
-            ),
-            "Sender": payload.get("loc-args0", ""),
-            "Content": payload.get("loc-args1", ""),
-        }
-
-        # スタンプ情報がある場合は追加
-        if (
-            payload.get("nType") == MessageType.NOTIFICATION_STICKER
-            and "extras" in payload
-        ):
-            try:
-                extras = json.loads(payload["extras"])
-                sticker = StickerInfo.from_dict(extras)
-                if sticker.sticker_type != StickerType.NONE:
-                    notification_content.update(
-                        {
-                            "Sticker Type": sticker.sticker_type.value,
-                            "Package ID": sticker.package_id,
-                            "Sticker ID": sticker.sticker_id,
-                        }
-                    )
-                    if sticker.options:
-                        notification_content["Options"] = sticker.options
-            except Exception as e:
-                logger.error(f"スタンプ情報解析エラー: {e}")
-
-        # デバッグモードの場合は追加情報を表示
-        if logger.getEffectiveLevel() <= logging.DEBUG:
-            debug_content = {
-                "Created at": payload.get("createTime", ""),
-                "Notification ID": payload.get("notification-id", ""),
-                "Badge count": payload.get("badge", 0),
-                "Channel number": payload.get("chNo", ""),
-                "Status type": payload.get("sType", ""),
-            }
-            if "extras" in payload:
-                debug_content["Raw Extras"] = payload["extras"]
-
-            self.console.print(
-                Panel(
-                    self._create_content_table(debug_content),
-                    title="[bold cyan]Debug Information[/bold cyan]",
-                    border_style="cyan",
-                    padding=(1, 2),
-                )
-            )
-
-        self.console.print(
-            Panel(
-                self._create_content_table(notification_content),
-                title="[bold blue]通知メッセージ[/bold blue]",
-                border_style="blue",
-                padding=(1, 2),
-            )
-        )
-
-    def _create_content_table(self, content: dict[str, Any]) -> Table:
-        """コンテンツテーブルを作成します.
-
-        Args:
-            content: 表示する内容の辞書
-
-        Returns:
-            Table: 整形されたテーブル
-        """
-        table = Table(box=ROUNDED, show_header=False, padding=(0, 1))
-        table.add_column("Key", style="cyan", width=15)
-        table.add_column("Value", style="green", overflow="fold")
-
-        for key, value in content.items():
-            # 長いテキストは折り返して表示
-            if isinstance(value, str) and len(value) > 100:
-                value = value[:97] + "..."
-            table.add_row(key, str(value))
-
-        return table
-
-    def _create_channel_message_panel(self, payload: dict[str, Any]) -> None:
-        """チャンネルメッセージのパネルを作成します.
-
-        Args:
-            payload: チャンネルメッセージのペイロード
-        """
-        relay_data = payload["relayDataList"][0]
-        body = relay_data["bdy"]
-
-        message_content = {
-            "Channel": relay_data.get("cid", ""),
-            "Command": relay_data.get("cmd", ""),
-            "Message Type": (
-                f"{body.get('msgTypeCode', 0)} "
-                f"({get_message_type_name(body.get('msgTypeCode', 0))})"
-            ),
-            "Content": body.get("msg", ""),
-            "Sender": body.get("writerInfo", {}).get("name", "Unknown"),
-        }
-
-        self.console.print(
-            self._create_message_panel("チャンネルメッセージ", message_content)
-        )
-
-    async def _process_packet(self, packet: MQTTPacket) -> None:
-        """MQTTパケットを処理します."""
-        try:
-            # パケットの詳細な解析
-            packet_info = analyze_packet(packet)
-            if not packet_info:
-                return
-
-            # パケットタイプに応じた処理
-            if packet.packet_type == PacketType.PUBLISH:
-                topic, payload, message_id = parse_publish(packet)
-
-                try:
-                    notification = json.loads(payload)
-
-                    # 重複チェック
-                    if self._is_duplicate_message(packet_info):
-                        message_key = (
-                            notification.get("notification-id")
-                            or f"{notification.get('relayDataList', [{}])[0].get('bdy', {}).get('msgSn', '')}"
-                        )
-                        self.console.print(
-                            Panel(
-                                f"[dim]前のメッセージと同じ内容です (ID: {message_key})[/dim]",
-                                border_style="dim blue",
-                                padding=(0, 1),
-                            )
-                        )
-                        await self._handle_qos(packet, message_id)
-                        return
-
-                    # パケット情報を出力
-                    flags = packet_info["flags"]
-                    length = packet_info["length"]
-                    logger.debug(
-                        f"パケット解析: PUBLISH "
-                        f"(DUP: {flags['dup']}, QoS: {flags['qos']}, "
-                        f"Retain: {flags['retain']}, Length: {length})"
-                    )
-
-                    # 生のパケットデータを表示
-                    if raw_packet := packet_info.get("raw_packet"):
-                        hex_dump = " ".join(f"{b:02x}" for b in raw_packet)
-                        self.console.print(
-                            Panel(
-                                hex_dump,
-                                title="[bold cyan]Raw Packet Data[/bold cyan]",
-                                border_style="cyan",
-                                padding=(0, 1),
-                            )
-                        )
-
-                    # メッセージを処理
-                    if message := parse_message(payload):
-                        await self._route_message(topic, message)
-
-                    await self._handle_qos(packet, message_id)
-                except json.JSONDecodeError as err:
-                    logger.error(f"JSONデコードエラー: {err}")
-
-            elif packet.packet_type == PacketType.CONNACK:
-                logger.info("MQTT connection established")
-            elif packet.packet_type == PacketType.PINGRESP:
-                logger.debug("Received PINGRESP")
-            elif packet.packet_type == PacketType.SUBACK:
-                self._handle_suback(packet)
-
-        except Exception as err:
-            logger.error(f"パケット処理エラー: {err}")
-
     async def _handle_qos(
         self, packet: MQTTPacket, message_id: Optional[int]
     ) -> None:
-        """QoS処理を行います."""
+        """QoS処理を行います.
+
+        Args:
+            packet: MQTTパケット
+            message_id: メッセージID
+        """
         if not self.ws:
             raise ConnectionError("WebSocket connection not established")
 
@@ -631,494 +554,29 @@ class WMQTTClient:
             await self.ws.send(cast(Data, puback.packet))
 
     def _handle_suback(self, packet: MQTTPacket) -> None:
-        """SUBACKパケットを処理します."""
+        """SUBACKパケットを処理します.
+
+        Args:
+            packet: SUBACKパケット
+        """
         message_id = packet.get_message_id()
         if message_id in self._pending_messages:
             self._pending_messages[message_id].set_result(True)
 
-    async def _process_payload(self, topic: str, payload: bytes) -> None:
-        """ペイロードを処理します."""
-        try:
-            self._log_payload(topic, payload)
-            data = json.loads(payload)
-            works_message = WorksMessage.from_dict(data)
-            await self._route_message(topic, works_message)
-        except json.JSONDecodeError as err:
-            raise MessageError(
-                ERROR_MESSAGES["MESSAGE_PARSE_ERROR"].format(detail=str(err))
-            ) from err
-        except ValueError as err:
-            raise MessageError(
-                ERROR_MESSAGES["INVALID_MESSAGE_FORMAT"].format(
-                    detail=str(err)
-                )
-            ) from err
-
-    def _log_payload(self, topic: str, payload: bytes) -> None:
-        """ペイロードの内容をログに記録します."""
-        logger.debug("\nReceived data:")
-        logger.debug(f"Topic: {topic}")
-        logger.debug("Payload:")
-        logger.debug(f"hex: {payload.hex()}")
-        logger.debug(f"str: {payload.decode('utf-8', errors='replace')}")
-
-    async def _route_message(self, topic: str, message: WorksMessage) -> None:
-        """メッセージを適切なハンドラーにルーティングします."""
-        if "nType" in message.body:
-            await self._handle_channel_message(topic, message)
-        elif message.command == MessageType.CMD_READ:
-            await self._handle_read_notification(message)
-        elif "msgTypeCode" in message.body:
-            await self._handle_channel_message(topic, message)
-        else:
-            logger.debug(f"Unknown command: {message.command}")
-
-    async def _handle_read_notification(self, message: WorksMessage) -> None:
-        """既読通知を処理します.
-
-        Args:
-            message: 既読通知メッセージ
-        """
-        body = message.body
-        logger.info("\nRead notification:")
-        logger.info(f"Channel: {message.channel_id}")
-        logger.info(f"User ID: {body.get('readerId')}")
-        logger.info(f"Message number: {body.get('msgSn')}")
-
-    def _format_sticker_info(self, sticker: StickerInfo) -> str:
-        """スタンプ情報をフォーマットします.
-
-        Args:
-            sticker: スタンプ情報
-
-        Returns:
-            str: Formatted sticker information
-        """
-        parts = [
-            "[yellow]Sticker info:[/yellow]",
-            f"  [blue]Type[/blue]: {sticker.sticker_type.value}",
-            f"  [blue]Package ID[/blue]: {sticker.package_id}",
-            f"  [blue]Sticker ID[/blue]: {sticker.sticker_id}",
-        ]
-        if sticker.options:
-            parts.append(f"  [blue]Options[/blue]: {sticker.options}")
-        return "\n".join(parts)
-
-    async def _handle_channel_message(
-        self,
-        topic: str,
-        message: WorksMessage,
-    ) -> None:
-        """チャンネルメッセージを処理します.
-
-        Args:
-            topic: メッセージトピック
-            message: 受信したメッセージ
-        """
-        body = message.body
-
-        if "nType" in body:
-            msg_type = body.get("nType", 0)
-            ch_type = body.get("chType", 0)
-
-            # 通知メッセージパネルを作成
-            notification_content = {
-                "Channel": body.get("chTitle", ""),
-                "Channel Type": get_channel_type_name(ch_type),
-                "Message Type": f"{msg_type} ({get_message_type_name(msg_type)})",
-                "Sender": body.get("loc-args0", ""),
-                "Sender ID": body.get("fromUserNo", ""),
-            }
-
-            # スタンプ情報がある場合は追加
-            if (
-                msg_type == MessageType.NOTIFICATION_STICKER
-                and "extras" in body
-            ):
-                try:
-                    extras = json.loads(body["extras"])
-                    sticker = StickerInfo.from_dict(extras)
-                    if sticker.sticker_type != StickerType.NONE:
-                        notification_content.update(
-                            {
-                                "Sticker Type": sticker.sticker_type.value,
-                                "Package ID": sticker.package_id,
-                                "Sticker ID": sticker.sticker_id,
-                                "Options": sticker.options or "None",
-                            }
-                        )
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.error(f"Sticker info parse error: {e}")
-
-            # デバッグ情報を追加
-            debug_content = {
-                "Created at": body.get("createTime", ""),
-                "Notification ID": body.get("notification-id", ""),
-                "Badge count": body.get("badge", 0),
-                "Channel number": body.get("chNo", ""),
-                "Status type": body.get("sType", ""),
-            }
-
-            self.console.print(
-                self._create_message_panel(
-                    "Notification Message", notification_content
-                )
-            )
-            if logger.getEffectiveLevel() <= logging.DEBUG:
-                self.console.print(
-                    self._create_message_panel(
-                        "Debug Information", debug_content
-                    )
-                )
-
-        else:
-            msg_type = body.get("msgTypeCode", 0)
-            ch_type = body.get("chType", 0)
-
-            # チャンネルメッセージパネルを作成
-            message_content = {
-                "Channel": message.channel_id,
-                "Channel Type": get_channel_type_name(ch_type),
-                "Message Type": f"{msg_type} ({get_message_type_name(msg_type)})",
-                "Content": body.get("msg", ""),
-                "Sender": body.get("writerInfo", {}).get("name", "Unknown"),
-            }
-
-            # デバッグ情報を追加
-            debug_content = {
-                "Created at": body.get("ctime", ""),
-                "Updated at": body.get("utime", ""),
-                "Member count": body.get("mbrCnt", 0),
-                "Message ID": body.get("msgTid", ""),
-                "Status": body.get("msgStatusType", ""),
-            }
-
-            self.console.print(
-                self._create_message_panel("Channel Message", message_content)
-            )
-            if logger.getEffectiveLevel() <= logging.DEBUG:
-                self.console.print(
-                    self._create_message_panel(
-                        "Debug Information", debug_content
-                    )
-                )
-
-    async def _log_mqtt_info(
-        self,
-        message_type: int,
-        dup_flag: int,
-        qos_level: int,
-        retain: int,
-        payload_length: int,
-    ) -> None:
-        """MQTTパケット情報をログに記録します.
-
-        Args:
-            message_type: メッセージタイプ
-            dup_flag: 重複フラグ
-            qos_level: QoSレベル
-            retain: 保持フラグ
-            payload_length: ペイロード長
-        """
-        try:
-            message_type_name = PacketType(message_type).name
-        except ValueError:
-            message_type_name = f"UNKNOWN({message_type})"
-
-        logger.debug(
-            f"MQTT: {message_type_name} "
-            f"(DUP: {dup_flag}, QoS: {qos_level}, Retain: {retain}, "
-            f"Length: {payload_length} bytes)",
-        )
-
-    async def stop(self) -> None:
-        """クライアントを停止します."""
-        self.running = False
-        if self.ws:
-            try:
-                packet = build_disconnect_packet()
-                await self.ws.send(cast(Data, packet.packet))
-                await self.ws.close()
-                self.state = StatusFlag.DISCONNECTED
-                logger.info("Connection closed")
-            except Exception as e:
-                logger.error(f"Error closing connection: {e}")
-
-    async def _start_keepalive(self) -> None:
-        """定期的にキープアライブパケットを送信します."""
-        while self.running:
-            try:
-                await asyncio.sleep(self.config.ping_interval)
-                if self.ws and not self.ws.closed:
-                    await self._send_pingreq()
-                    logger.debug("Sent keepalive packet")
-            except (
-                websockets.exceptions.WebSocketException,
-                ConnectionError,
-                asyncio.CancelledError,
-            ) as e:
-                if not isinstance(e, asyncio.CancelledError):
-                    logger.error(f"Keepalive error: {e}")
-                break
-
-    async def _send_pingreq(self) -> None:
-        """MQTT PINGREQパケットを送信します."""
-        if not self.ws:
-            raise ConnectionError("WebSocket connection not established")
-
-        try:
-            packet = build_ping_packet()
-            await self.ws.send(cast(Data, packet.packet))
-        except Exception as e:
-            logger.error(f"Error sending PINGREQ: {e}")
-
-    async def _log_mqtt_packet(
-        self, packet: MQTTPacket, direction: str = ">>"
-    ) -> None:
-        """MQTTパケットの詳細をログに出力します."""
-        try:
-            msg_type = packet.packet_type.name
-            header_content = {
-                "Type": f"0x{packet.packet_type:02x}",
-                "DUP": str((packet.flags & 0x08) >> 3),
-                "QoS": str((packet.flags & 0x06) >> 1),
-                "Retain": str(packet.flags & 0x01),
-                "Length": str(packet.remaining_length),
-            }
-
-            self.console.print(
-                self._create_message_panel(
-                    f"MQTT {direction} {msg_type}", header_content
-                )
-            )
-
-            if packet.payload:
-                payload_content: Dict[str, str] = {
-                    "hex": packet.payload.hex(" ")
-                }
-
-                if packet.packet_type == PacketType.PUBLISH:
-                    topic, payload, msg_id = parse_publish(packet)
-                    payload_content["Topic"] = topic
-                    payload_content["Message ID"] = (
-                        str(msg_id) if msg_id else "None"
-                    )
-
-                    try:
-                        decoded = payload.decode("utf-8", errors="replace")
-                        payload_content["Content"] = decoded
-                        self._parse_message_payload(decoded)
-                    except UnicodeDecodeError:
-                        payload_content["Content"] = "(binary data)"
-                else:
-                    try:
-                        payload_content["str"] = packet.payload.decode(
-                            "utf-8", errors="replace"
-                        )
-                    except UnicodeDecodeError:
-                        pass
-
-                self.console.print(
-                    self._create_message_panel("Payload", payload_content)
-                )
-
-        except Exception as e:
-            logger.error(f"パケットログ出力エラー: {e}")
-
-    def _parse_connect_packet(self, packet: MQTTPacket) -> dict[str, Any]:
-        """CONNECTパケットの内容を解析する.
-
-        Args:
-            packet: CONNECTパケット
-
-        Returns:
-            dict: 解析された接続情報
-        """
-        try:
-            if packet.payload is None:
-                raise ValueError("No payload in CONNECT packet")
-
-            # プロトコル名の長さを取得
-            protocol_name_len = struct.unpack("!H", packet.payload[0:2])[0]
-
-            # プロトコル名を取得
-            protocol_name = packet.payload[2 : 2 + protocol_name_len].decode(
-                "utf-8"
-            )
-
-            # プロトコルレベルを取得
-            protocol_level = packet.payload[2 + protocol_name_len]
-
-            # 接続フラグを取得
-            connect_flags = packet.payload[2 + protocol_name_len + 1]
-
-            # キープアライブを取得
-            keep_alive = struct.unpack(
-                "!H",
-                packet.payload[
-                    2 + protocol_name_len + 2 : 2 + protocol_name_len + 4
-                ],
-            )[0]
-
-            return {
-                "protocol_name": protocol_name,
-                "protocol_level": protocol_level,
-                "clean_session": bool(connect_flags & 0x02),
-                "will_flag": bool(connect_flags & 0x04),
-                "will_qos": (connect_flags & 0x18) >> 3,
-                "will_retain": bool(connect_flags & 0x20),
-                "password_flag": bool(connect_flags & 0x40),
-                "username_flag": bool(connect_flags & 0x80),
-                "keep_alive": keep_alive,
-            }
-        except Exception as e:
-            logger.error(f"CONNECTパケット解析エラー: {e}")
-            return {}
-
-    def _parse_message_payload(self, payload: str) -> None:
-        """メッセージペイロードをJSONとして解析します."""
-        try:
-            data = json.loads(payload)
-            if "relayDataList" in data:
-                for relay_data in data["relayDataList"]:
-                    cmd = relay_data.get("cmd")
-                    body = relay_data.get("bdy", {})
-
-                    relay_content = {
-                        "Command": cmd,
-                        "Service ID": relay_data.get("svcid"),
-                        "Channel ID": relay_data.get("cid"),
-                    }
-
-                    if cmd == MessageType.CMD_READ:
-                        read_content = {
-                            "Channel": body.get("cid"),
-                            "Reader": body.get("readerId"),
-                            "Message": body.get("msgSn"),
-                        }
-                        self.console.print(
-                            self._create_message_panel(
-                                "Read Notification", read_content
-                            )
-                        )
-                    elif "msgTypeCode" in body:
-                        msg_type = body["msgTypeCode"]
-                        message_content = {
-                            "Type": get_message_type_name(msg_type),
-                            "Channel": relay_data.get("cid"),
-                            "Message ID": body.get("msgTid"),
-                            "Content": body.get("msg", ""),
-                            "Status": body.get("msgStatusType", ""),
-                            "Sender": body.get("writerInfo", {}).get(
-                                "name", "Unknown"
-                            ),
-                        }
-
-                        if (
-                            msg_type == MessageType.NOTIFICATION_STICKER
-                            and "extras" in body
-                        ):
-                            try:
-                                extras = json.loads(body["extras"])
-                                sticker = StickerInfo.from_dict(extras)
-                                message_content.update(
-                                    {
-                                        "Sticker Type": sticker.sticker_type.value,
-                                        "Package ID": sticker.package_id,
-                                        "Sticker ID": sticker.sticker_id,
-                                        "Options": sticker.options or "None",
-                                    }
-                                )
-                            except Exception as e:
-                                logger.error(f"スタンプ情報解析エラー: {e}")
-
-                        self.console.print(
-                            self._create_message_panel(
-                                "Message", message_content
-                            )
-                        )
-
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON解析エラー: {e}")
-
-    def _create_message_panel(
-        self, title: str, content: dict[str, Any]
-    ) -> Panel:
-        """メッセージパネルを作成します.
-
-        Args:
-            title: パネルのタイトル
-            content: 表示する内容の辞書
-
-        Returns:
-            Panel: 整形されたパネル
-        """
-        table = Table(box=ROUNDED, show_header=False)
-        table.add_column("Key", style="cyan")
-        table.add_column("Value", style="green", overflow="fold")
-
-        for key, value in content.items():
-            # 長いテキストは折り返して表示
-            if isinstance(value, str) and len(value) > 100:
-                value = value[:97] + "..."
-            table.add_row(key, str(value))
-
-        return Panel(
-            table,
-            title=f"[bold blue]{title}[/bold blue]",
-            border_style="blue",
-            padding=(1, 2),
-        )
-
-    async def _handle_publish(self, packet: MQTTPacket) -> None:
-        """PUBLISHパケットを処理します."""
-        try:
-            topic, payload, message_id = parse_publish(packet)
-
-            try:
-                notification = json.loads(payload)
-                packet_info = analyze_packet(packet)
-
-                # 重複チェック
-                if self._is_duplicate_message(packet_info):
-                    message_key = (
-                        notification.get("notification-id")
-                        or f"{notification.get('relayDataList', [{}])[0].get('bdy', {}).get('msgSn', '')}"
-                    )
-                    self.console.print(
-                        Panel(
-                            f"[dim]前のメッセージと同じ内容です (ID: {message_key})[/dim]",
-                            border_style="dim blue",
-                            padding=(0, 1),
-                        )
-                    )
-                    await self._handle_qos(packet, message_id)
-                    return
-
-                # メッセージを処理
-                if message := parse_message(payload):
-                    await self._route_message(topic, message)
-
-                await self._handle_qos(packet, message_id)
-            except json.JSONDecodeError as err:
-                logger.error(f"JSONデコードエラー: {err}")
-
-        except ValueError as err:
-            raise PacketError(
-                ERROR_MESSAGES["PACKET_PARSE_ERROR"].format(detail=str(err))
-            ) from err
-
 
 async def main() -> None:
     """アプリケーションのメインエントリーポイント."""
+    # ロギングの設定を初期化
+    setup_logging(level=logging.DEBUG)  # デバッグレベルで詳細なログを出力
+
     client = WMQTTClient()
     try:
         await client.start()
     except KeyboardInterrupt:
-        logger.info("Starting shutdown...")
+        logger.info("シャットダウンを開始します...")
         await client.stop()
     except Exception as e:
-        logger.error(f"Unexpected error occurred: {e}")
+        logger.error(f"予期せぬエラーが発生しました: {e}")
         await client.stop()
         raise
 
