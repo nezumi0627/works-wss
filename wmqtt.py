@@ -8,11 +8,6 @@ Works MobileのMQTTサービスに接続するためのWebSocketクライアン�
 - 自動再接続
 - キープアライブ処理
 - エラーハンドリング
-
-使用例:
-
-    client = WMQTTClient()
-    await client.start()
 """
 
 import asyncio
@@ -20,7 +15,6 @@ import json
 import ssl
 import uuid
 from dataclasses import dataclass
-from enum import IntEnum
 from pathlib import Path
 from typing import Dict, Optional, cast
 
@@ -39,6 +33,7 @@ from constants import (
     WS_SUBPROTOCOL,
     WS_URL,
     WS_USER_AGENT,
+    StatusFlag,
 )
 from exceptions import (
     ERROR_MESSAGES,
@@ -57,42 +52,6 @@ from message_types import (
 from models import WorksMessage
 from mqtt_packet import MQTTMessageType, MQTTPacket
 from sticker_types import StickerInfo
-
-
-class StatusFlag(IntEnum):
-    """ユーザーステータスフラグ.
-
-    ユーザーの現在のオンラインステータスを表します。
-
-    Attributes:
-        ONLINE: オンライン状態
-        AWAY: 離席中状態
-        OFFLINE: オフライン状態
-    """
-
-    ONLINE = 138  # オンライン状態
-    AWAY = 139  # 離席中状態
-    OFFLINE = 140  # オフライン状態
-
-    @classmethod
-    def get_name(cls, value: int) -> str:
-        """ステータスフラグの名前を取得します.
-
-        Args:
-            value: ステータスフラグの値
-
-        Returns:
-            str: Human readable status name
-        """
-        try:
-            name_map = {
-                int(cls.ONLINE): "Online",
-                int(cls.AWAY): "Away",
-                int(cls.OFFLINE): "Offline",
-            }
-            return name_map.get(value, f"Unknown({value})")
-        except ValueError:
-            return f"Unknown({value})"
 
 
 @dataclass
@@ -151,6 +110,7 @@ class WMQTTClient:
         current_retry: 現在のリトライ試行回数
         message_id: メッセージID カウンター
         ws: WebSocket接続オブジェクト
+        state: 現在の接続状態
     """
 
     def __init__(
@@ -183,6 +143,7 @@ class WMQTTClient:
         self.message_id = 0
         self.ws: Optional[WebSocketClientProtocol] = None
         self._pending_messages: Dict[int, asyncio.Future] = {}
+        self.state = StatusFlag.DISCONNECTED
 
     def _load_cookies(self) -> str:
         """クッキーファイルを読み込みます.
@@ -256,6 +217,7 @@ class WMQTTClient:
             logger.debug(f"Origin: {self.ws_config.origin}")
             logger.debug(f"Protocol: {self.ws_config.subprotocol}")
 
+            self.state = StatusFlag.CONNECTING
             self.ws = await websockets.connect(
                 self.ws_config.url,
                 ssl=ssl.create_default_context(),
@@ -265,6 +227,7 @@ class WMQTTClient:
             )
             logger.info("WebSocket connection established successfully")
             await self._mqtt_connect()
+            self.state = StatusFlag.CONNECTED
 
             # Reset retry counter on successful connection
             self.current_retry = 0
@@ -275,12 +238,14 @@ class WMQTTClient:
                 tg.create_task(self.listen())
 
         except websockets.exceptions.InvalidStatusCode as err:
+            self.state = StatusFlag.DISCONNECTED
             raise AuthenticationError(
                 ERROR_MESSAGES["AUTHENTICATION_FAILED"].format(
                     reason=f"HTTP {err.status_code}"
                 )
             ) from err
         except websockets.exceptions.ConnectionClosed as err:
+            self.state = StatusFlag.DISCONNECTED
             raise ConnectionError(
                 ERROR_MESSAGES["CONNECTION_CLOSED"].format(
                     code=err.code, reason=err.reason
@@ -291,6 +256,7 @@ class WMQTTClient:
             ConnectionError,
             asyncio.CancelledError,
         ) as err:
+            self.state = StatusFlag.DISCONNECTED
             raise ConnectionError(
                 ERROR_MESSAGES["CONNECTION_FAILED"].format(
                     reason=f"{err.__class__.__name__}: {err}"
@@ -575,6 +541,7 @@ class WMQTTClient:
         if self.ws:
             try:
                 await self.ws.close()
+                self.state = StatusFlag.DISCONNECTED
                 logger.info("Connection closed")
             except Exception as e:
                 logger.error(f"Error closing connection: {e}")

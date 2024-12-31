@@ -1,16 +1,26 @@
 # Works MQTT WebSocket Client
 
-Works MobileのMQTTサービスに接続するためのPythonクライアントライブラリです。
-WebSocketを介してリアルタイムメッセージングを実現します。
+LINE Works MobileのMQTT
+WebSocketを模倣し、通信を受け取るPythonクライアントの開発用リポジトリです。
+認証にはCookieを使用します。
+
+> **Note**:
+> Cookieは、ブラウザの開発者ツール(F12)でメッセージ送信時(sendMessage)などの通信を確認し、そこで使用されているものを利用してください。
+
+## TODO
+
+- メッセージタイプの定義の拡張
+- AWAYなどの項目の詳細調査
+- アップデートに伴う構造変更への対応
 
 ## 機能
 
 - WebSocket経由でのMQTT接続
-- メッセージの送受信
-- 自動再接続
-- キープアライブ処理
+- Works通信の受信
+- 自動再接続機能
+- キープアライブ（PING送信）
 - エラーハンドリング
-- リッチなログ出力
+- 詳細なログ出力
 
 ## 必要条件
 
@@ -18,39 +28,9 @@ WebSocketを介してリアルタイムメッセージングを実現します�
 - websockets
 - rich
 
-## インストール
+## 構造
 
-```bash
-pip install -r requirements.txt
-```
-
-## 使用方法
-
-1. `cookie.json`を作成し、Works Mobileの認証情報を設定します：
-
-```json
-{
-    "WORKS_COOKIE_NAME": "WORKS_COOKIE_VALUE"
-}
-```
-
-2. クライアントを実行：
-
-```python
-from wmqtt import WMQTTClient
-
-async def main():
-    client = WMQTTClient()
-    await client.start()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-## セキュリティ
-
-- `cookie.json`は`.gitignore`に含まれており、リポジトリにはコミットされません
-- すべての通信はSSL/TLSで暗号化されます
+[STRUCTURE.md](STRUCTURE.md)
 
 ## ライセンス
 

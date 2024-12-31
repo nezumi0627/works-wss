@@ -9,8 +9,10 @@ Works Mobileの定数と設定値を定義するモジュール。
 - スタンプフィールド定義
 - ログ設定
 - コンソール表示設定
+- ユーザーステータス定義
 """
 
+from enum import IntEnum
 from typing import Dict, Final
 
 # WebSocket設定
@@ -90,3 +92,39 @@ CONSOLE_THEME: Final[Dict[str, str]] = {
     "success": "green",
     "header": "magenta",
 }
+
+
+class StatusFlag(IntEnum):
+    """WebSocket接続状態フラグ.
+
+    WebSocketの現在の接続状態を表します。
+
+    Attributes:
+        DISCONNECTED: 未接続状態
+        CONNECTING: 接続試行中
+        CONNECTED: 接続完了
+    """
+
+    DISCONNECTED = 0  # 未接続状態
+    CONNECTING = 1  # 接続試行中
+    CONNECTED = 2  # 接続完了
+
+    @classmethod
+    def get_name(cls, value: int) -> str:
+        """接続状態の名前を取得します.
+
+        Args:
+            value: 接続状態の値
+
+        Returns:
+            str: Human readable status name
+        """
+        try:
+            name_map = {
+                int(cls.DISCONNECTED): "Disconnected",
+                int(cls.CONNECTING): "Connecting",
+                int(cls.CONNECTED): "Connected",
+            }
+            return name_map.get(value, f"Unknown({value})")
+        except ValueError:
+            return f"Unknown({value})"
