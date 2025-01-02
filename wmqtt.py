@@ -21,7 +21,13 @@ from pathlib import Path
 from typing import Dict, Optional, cast
 
 import websockets
-from websockets.client import WebSocketClientProtocol
+import websockets.client
+from websockets.exceptions import (
+    ConnectionClosed,
+    InvalidHandshake,
+    WebSocketException,
+)
+from websockets.legacy.client import WebSocketClientProtocol
 from websockets.typing import Data, Subprotocol
 
 from core import (
@@ -243,7 +249,7 @@ class WMQTTClient:
             self.ws = await websockets.connect(
                 self.ws_config.url,
                 ssl=ssl.create_default_context(),
-                extra_headers=self.headers,
+                additional_headers=self.headers,
                 subprotocols=[self.ws_config.subprotocol],
                 ping_interval=None,
             )
@@ -270,16 +276,14 @@ class WMQTTClient:
                 tg.create_task(self._start_keepalive())
                 tg.create_task(self.listen())
 
-        except websockets.exceptions.InvalidStatusCode as err:
+        except InvalidHandshake as err:
             self.state = StatusFlag.DISCONNECTED
             logger.error("-" * 50)
-            logger.error(f"認証エラー: HTTP {err.status_code}")
+            logger.error(f"認証エラー: {err}")
             logger.error(f"接続状態: {self.state.name}")
             logger.error("-" * 50)
             raise AuthenticationError(
-                ERROR_MESSAGES["AUTHENTICATION_FAILED"].format(
-                    reason=f"HTTP {err.status_code}"
-                )
+                ERROR_MESSAGES["AUTHENTICATION_FAILED"].format(reason=str(err))
             ) from err
         except websockets.exceptions.ConnectionClosed as err:
             self.state = StatusFlag.DISCONNECTED
@@ -293,7 +297,7 @@ class WMQTTClient:
                 )
             ) from err
         except (
-            websockets.exceptions.WebSocketException,
+            WebSocketException,
             ConnectionError,
             asyncio.CancelledError,
         ) as err:
@@ -336,7 +340,7 @@ class WMQTTClient:
                     logger.warning(
                         f"バイナリ以外のメッセージを受信: {message}"
                     )
-        except websockets.exceptions.ConnectionClosed as err:
+        except ConnectionClosed as err:
             logger.error(f"WebSocket接続が切断されました: {err}")
         except asyncio.CancelledError:
             logger.info("メッセージ監視タスクを終了します")
@@ -503,7 +507,7 @@ class WMQTTClient:
                 if self.ws and not self.ws.closed:
                     await self._send_pingreq()
             except (
-                websockets.exceptions.WebSocketException,
+                WebSocketException,
                 ConnectionError,
                 asyncio.CancelledError,
             ) as e:
