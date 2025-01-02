@@ -67,9 +67,7 @@ from mqtt import (
     build_publish_packet,
     parse_packet,
 )
-from mqtt.packet.parser import (
-    parse_publish,
-)
+from mqtt.packet.parser import parse_publish
 
 
 @dataclass
@@ -374,7 +372,8 @@ class WMQTTClient:
                 try:
                     notification = json.loads(payload)
                     logger.debug(
-                        f"データ: {json.dumps(notification, ensure_ascii=False)}"
+                        f"データ: "
+                        f"{json.dumps(notification, ensure_ascii=False)}"
                     )
 
                     # 重複チェック
@@ -406,84 +405,89 @@ class WMQTTClient:
         """メッセージを適切なハンドラーにルーティングします."""
         try:
             if "nType" in message.body:
-                msg_type = message.body.get("nType", 0)
-                ch_type = message.body.get("chType", 0)
-                ch_title = message.body.get("chTitle", "")
-                status = message.body.get("sType", "不明")
-
-                # チャンネルタイプの取得
-                channel_type_name = get_channel_type_name(ch_type)
-                # メッセージタイプの取得
-                message_type_name = get_message_type_name(msg_type)
-
-                logger.info(
-                    f"通知: {ch_title} "
-                    f"({channel_type_name}, {message_type_name}, "
-                    f"ステータス: {status})"
-                )
-
-                # 詳細情報のログ出力
-                if msg_type == MessageType.NOTIFICATION_MESSAGE:
-                    logger.debug(
-                        f"メッセージ詳細: "
-                        f"送信者={message.body.get('loc-args0', '')}, "
-                        f"内容={message.body.get('loc-args1', '')}"
-                    )
-                elif msg_type == MessageType.NOTIFICATION_STICKER:
-                    try:
-                        extras = json.loads(message.body.get("extras", "{}"))
-                        sticker_info = StickerInfo(
-                            sticker_type=extras.get("stkType", "none"),
-                            package_id=extras.get("pkgId", ""),
-                            sticker_id=extras.get("stkId", ""),
-                            options=extras.get("stkOpt"),
-                        )
-                        logger.debug(
-                            f"スタンプ詳細: "
-                            f"タイプ={sticker_info.sticker_type}, "
-                            f"パッケージ={sticker_info.package_id}, "
-                            f"ID={sticker_info.sticker_id}"
-                        )
-                    except json.JSONDecodeError:
-                        logger.warning("スタンプ情報の解析に失敗しました")
-
+                await self._handle_notification(message)
             elif message.command == MessageType.CMD_READ:
-                body = message.body
-                logger.info(
-                    f"既読通知: チャンネル {message.channel_id} "
-                    f"メッセージ #{body.get('msgSn')} "
-                    f"ユーザー {body.get('readerId')}"
-                )
-
+                await self._handle_read_receipt(message)
             elif "msgTypeCode" in message.body:
-                msg_type = message.body.get("msgTypeCode", 0)
-                ch_type = message.body.get("chType", 0)
-
-                # チャンネルタイプの取得
-                channel_type_name = get_channel_type_name(ch_type)
-                # メッセージタイプの取得
-                message_type_name = get_message_type_name(msg_type)
-
-                logger.info(
-                    f"メッセージ: チャンネル {message.channel_id} "
-                    f"({channel_type_name}, {message_type_name})"
-                )
-
-                # 特定のメッセージタイプに応じた詳細情報
-                if msg_type == MessageType.NORMAL:
-                    logger.debug(
-                        f"テキスト内容: {message.body.get('content', '')}"
-                    )
-                elif msg_type == MessageType.LEAVE:
-                    logger.debug(f"退出者: {message.body.get('userId', '')}")
-                elif msg_type == MessageType.INVITE:
-                    logger.debug(
-                        f"招待者: {message.body.get('inviter', '')}, "
-                        f"招待されたユーザー: {message.body.get('invitee', '')}"
-                    )
-
+                await self._handle_chat_message(message)
         except Exception as err:
             logger.error(f"メッセージルーティングエラー: {err}")
+
+    async def _handle_notification(self, message: WorksMessage) -> None:
+        """通知メッセージを処理します."""
+        msg_type = message.body.get("nType", 0)
+        ch_type = message.body.get("chType", 0)
+        ch_title = message.body.get("chTitle", "")
+        status = message.body.get("sType", "不明")
+
+        channel_type_name = get_channel_type_name(ch_type)
+        message_type_name = get_message_type_name(msg_type)
+
+        logger.info(
+            f"通知: {ch_title} "
+            f"({channel_type_name}, {message_type_name}, "
+            f"ステータス: {status})"
+        )
+
+        if msg_type == MessageType.NOTIFICATION_MESSAGE:
+            logger.debug(
+                f"メッセージ詳細: "
+                f"送信者={message.body.get('loc-args0', '')}, "
+                f"内容={message.body.get('loc-args1', '')}"
+            )
+        elif msg_type == MessageType.NOTIFICATION_STICKER:
+            self._log_sticker_info(message)
+
+    def _log_sticker_info(self, message: WorksMessage) -> None:
+        """スタンプ情報をログに出力します."""
+        try:
+            extras = json.loads(message.body.get("extras", "{}"))
+            sticker_info = StickerInfo(
+                sticker_type=extras.get("stkType", "none"),
+                package_id=extras.get("pkgId", ""),
+                sticker_id=extras.get("stkId", ""),
+                options=extras.get("stkOpt"),
+            )
+            logger.debug(
+                f"スタンプ詳細: "
+                f"タイプ={sticker_info.sticker_type}, "
+                f"パッケージ={sticker_info.package_id}, "
+                f"ID={sticker_info.sticker_id}"
+            )
+        except json.JSONDecodeError:
+            logger.warning("スタンプ情報の解析に失敗しました")
+
+    async def _handle_read_receipt(self, message: WorksMessage) -> None:
+        """既読通知を処理します."""
+        body = message.body
+        logger.info(
+            f"既読通知: チャンネル {message.channel_id} "
+            f"メッセージ #{body.get('msgSn')} "
+            f"ユーザー {body.get('readerId')}"
+        )
+
+    async def _handle_chat_message(self, message: WorksMessage) -> None:
+        """チャットメッセージを処理します."""
+        msg_type = message.body.get("msgTypeCode", 0)
+        ch_type = message.body.get("chType", 0)
+
+        channel_type_name = get_channel_type_name(ch_type)
+        message_type_name = get_message_type_name(msg_type)
+
+        logger.info(
+            f"メッセージ: チャンネル {message.channel_id} "
+            f"({channel_type_name}, {message_type_name})"
+        )
+
+        if msg_type == MessageType.NORMAL:
+            logger.debug(f"テキスト内容: {message.body.get('content', '')}")
+        elif msg_type == MessageType.LEAVE:
+            logger.debug(f"退出者: {message.body.get('userId', '')}")
+        elif msg_type == MessageType.INVITE:
+            logger.debug(
+                f"招待者: {message.body.get('inviter', '')}, "
+                f"招待されたユーザー: {message.body.get('invitee', '')}"
+            )
 
     async def stop(self) -> None:
         """クライアントを停止します."""
