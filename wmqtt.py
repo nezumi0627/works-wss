@@ -62,7 +62,6 @@ from mqtt import (
     parse_packet,
 )
 from mqtt.packet.parser import (
-    parse_packet,
     parse_publish,
 )
 
