@@ -43,6 +43,15 @@ class WorksMessage:
         Raises:
             ValueError: 必須フィールドが存在しない場合
         """
+        # リレーメッセージの場合
+        if "cmd" in data and "bdy" in data:
+            return cls(
+                command=MessageType(data["cmd"]),
+                channel_id=str(data.get("cid", "")),
+                body=data["bdy"],
+            )
+
+        # 通常のメッセージの場合
         missing_fields = [
             key for key in cls.REQUIRED_FIELDS if key not in data
         ]

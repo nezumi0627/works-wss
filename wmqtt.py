@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, cast
 
+import aiohttp
 import websockets
 import websockets.client
 from websockets.exceptions import (
@@ -381,7 +382,11 @@ class WMQTTClient:
                         return
 
                     # メッセージを処理
-                    if message := parse_message(payload):
+                    if "relayDataList" in notification:
+                        for relay_data in notification["relayDataList"]:
+                            if message := WorksMessage.from_dict(relay_data):
+                                await self._route_message(topic, message)
+                    elif message := parse_message(payload):
                         await self._route_message(topic, message)
 
                     await self._handle_qos(packet, message_id)
@@ -404,12 +409,25 @@ class WMQTTClient:
     async def _route_message(self, topic: str, message: WorksMessage) -> None:
         """メッセージを適切なハンドラーにルーティングします."""
         try:
-            if "nType" in message.body:
-                await self._handle_notification(message)
-            elif message.command == MessageType.CMD_READ:
+            msg_type = message.command
+            if msg_type == MessageType.NOTIFICATION_BADGE:
+                await self._handle_badge_update(message)
+            elif msg_type == MessageType.CMD_READ:
                 await self._handle_read_receipt(message)
+            elif msg_type in [
+                MessageType.NOTIFICATION_MESSAGE,
+                MessageType.NOTIFICATION_STICKER,
+                MessageType.NOTIFICATION_FILE,
+                MessageType.NOTIFICATION_SERVICE,
+                MessageType.NOTIFICATION_EMOJI,
+                MessageType.NOTIFICATION_IMAGE,
+            ]:
+                await self._handle_notification(message)
             elif "msgTypeCode" in message.body:
                 await self._handle_chat_message(message)
+            else:
+                logger.debug(f"未処理のメッセージタイプ: {msg_type}")
+                logger.debug(f"内容: {message.body}")
         except Exception as err:
             logger.error(f"メッセージルーティングエラー: {err}")
 
@@ -419,6 +437,7 @@ class WMQTTClient:
         ch_type = message.body.get("chType", 0)
         ch_title = message.body.get("chTitle", "")
         status = message.body.get("sType", "不明")
+        channel_no = message.body.get("chNo")
 
         channel_type_name = get_channel_type_name(ch_type)
         message_type_name = get_message_type_name(msg_type)
@@ -435,6 +454,9 @@ class WMQTTClient:
                 f"送信者={message.body.get('loc-args0', '')}, "
                 f"内容={message.body.get('loc-args1', '')}"
             )
+            # メッセージ通知の場合は既読情報を取得
+            if channel_no:
+                await self._fetch_read_infos(channel_no)
         elif msg_type == MessageType.NOTIFICATION_STICKER:
             self._log_sticker_info(message)
 
@@ -458,13 +480,34 @@ class WMQTTClient:
             logger.warning("スタンプ情報の解析に失敗しました")
 
     async def _handle_read_receipt(self, message: WorksMessage) -> None:
-        """既読通知を処理します."""
-        body = message.body
-        logger.info(
-            f"既読通知: チャンネル {message.channel_id} "
-            f"メッセージ #{body.get('msgSn')} "
-            f"ユーザー {body.get('readerId')}"
-        )
+        """既読通知を処理します.
+
+        Args:
+            message: 既読通知メッセージ
+        """
+        try:
+            body = message.body
+            msg_sn = body.get("msgSn")
+            reader_id = body.get("uid", "不明")
+            channel_id = message.channel_id
+            msg_tid = body.get("msgTid", "不明")
+            read_msgs = body.get("readMsgs", [])
+
+            logger.info("既読通知を受信しました")
+            logger.info(f"チャンネル: {channel_id}")
+            logger.info(f"メッセージ番号: {msg_sn}")
+            logger.info(f"メッセージID: {msg_tid}")
+            logger.info(f"既読者ID: {reader_id}")
+            if read_msgs:
+                logger.info("既読範囲:")
+                for read_msg in read_msgs:
+                    first = read_msg.get("first", 0)
+                    last = read_msg.get("last", 0)
+                    logger.info(f"  {first} から {last} まで")
+            logger.debug(f"詳細: {body}")
+
+        except Exception as e:
+            logger.error(f"既読通知の処理に失敗しました: {e}")
 
     async def _handle_chat_message(self, message: WorksMessage) -> None:
         """チャットメッセージを処理します."""
@@ -508,7 +551,7 @@ class WMQTTClient:
         while self.running:
             try:
                 await asyncio.sleep(self.config.ping_interval)
-                if self.ws and not self.ws.closed:
+                if self.ws and self.ws.close_code is None:
                     await self._send_pingreq()
             except (
                 WebSocketException,
@@ -604,6 +647,85 @@ class WMQTTClient:
         message_id = packet.get_message_id()
         if message_id in self._pending_messages:
             self._pending_messages[message_id].set_result(True)
+
+    async def _handle_message(self, message: WorksMessage) -> None:
+        """メッセージを処理します.
+
+        Args:
+            message: 処理対象のメッセージ
+        """
+        try:
+            if message.command == MessageType.CMD_READ:
+                await self._handle_read_receipt(message)
+            elif message.command == MessageType.NOTIFICATION_BADGE:
+                await self._handle_badge_update(message)
+            else:
+                logger.info(
+                    f"メッセージ受信: {get_message_type_name(message.command)}"
+                )
+                logger.debug(f"内容: {message.body}")
+
+        except Exception as e:
+            logger.error(f"メッセージ処理エラー: {e}")
+
+    async def _handle_badge_update(self, message: WorksMessage) -> None:
+        """バッジ更新通知を処理します.
+
+        Args:
+            message: バッジ更新通知メッセージ
+        """
+        try:
+            body = message.body
+            badge_count = body.get("badge", 0)
+            user_no = body.get("userNo", "不明")
+            domain_id = body.get("domain_id", "不明")
+
+            logger.info("バッジ更新通知を受信しました")
+            logger.info(f"ドメイン: {domain_id}")
+            logger.info(f"ユーザー: {user_no}")
+            logger.info(f"バッジ数: {badge_count}")
+            logger.debug(f"詳細: {body}")
+
+        except Exception as e:
+            logger.error(f"バッジ更新通知の処理に失敗しました: {e}")
+
+    async def _fetch_read_infos(self, channel_no: int) -> None:
+        """既読情報を取得します.
+
+        Args:
+            channel_no: チャンネル番号
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = "https://talk.worksmobile.com/p/oneapp/client/chat/getReadInfos"
+                headers = {
+                    "Cookie": self.headers["Cookie"],
+                    "Content-Type": "application/json",
+                    "User-Agent": self.headers["User-Agent"],
+                }
+                data = {"channelNo": channel_no}
+                async with session.post(
+                    url, headers=headers, json=data
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        logger.info(
+                            f"チャンネル {channel_no} の既読情報を取得しました"
+                        )
+                        logger.debug(
+                            f"既読情報: {json.dumps(data, ensure_ascii=False)}"
+                        )
+                    else:
+                        logger.error(
+                            f"既読情報の取得に失敗しました: {response.status}"
+                        )
+                        error_data = await response.json()
+                        logger.error(
+                            f"エラー詳細: {json.dumps(error_data, ensure_ascii=False)}"
+                        )
+
+        except Exception as e:
+            logger.error(f"既読情報の取得中にエラーが発生しました: {e}")
 
 
 async def main() -> None:

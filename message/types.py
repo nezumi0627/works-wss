@@ -34,25 +34,27 @@ class MessageType(IntEnum):
         LEAVE (202): チャンネルからの退出通知
         INVITE (203): 新規メンバーの招待通知
         KICK (204): メンバーのキック通知
-        CMD_READ (93004): 既読通知
+        CMD_READ (93001): 既読通知
+        CMD_DELIVERED (93002): 配信確認通知
         NOTIFICATION_MESSAGE (1): テキスト通知
         NOTIFICATION_STICKER (18): スタンプ通知
         NOTIFICATION_FILE (16): ファイル通知
         NOTIFICATION_SERVICE (100): システム通知
         NOTIFICATION_EMOJI (27): 絵文字通知
         NOTIFICATION_IMAGE (11): 画像通知
-        NOTIFICATION_BADGE (41): バッジ更新通知(未解析)
+        NOTIFICATION_BADGE (41): バッジ更新通知
     """
 
     # チャンネルメッセージタイプ
     NORMAL = 101
-    AWAY = 102  # TODO: 不在メッセージの詳細仕様を確認
+    AWAY = 102
     LEAVE = 202
     INVITE = 203
     KICK = 204
 
     # コマンドメッセージタイプ
-    CMD_READ = 93004
+    CMD_READ = 93001
+    CMD_DELIVERED = 93002
 
     # 通知メッセージタイプ
     NOTIFICATION_MESSAGE = 1
@@ -61,19 +63,20 @@ class MessageType(IntEnum):
     NOTIFICATION_SERVICE = 100
     NOTIFICATION_EMOJI = 27
     NOTIFICATION_IMAGE = 11
-    NOTIFICATION_BADGE = 41  # TODO: バッジ更新通知の詳細仕様を確認
+    NOTIFICATION_BADGE = 41
 
 
 # メッセージタイプと表示名の対応マップ
 MESSAGE_TYPE_NAMES: dict[int, str] = {
     # チャンネルメッセージ
     MessageType.NORMAL: "テキストメッセージ",
-    MessageType.AWAY: "不在メッセージ(未解析)",
+    MessageType.AWAY: "不在メッセージ",
     MessageType.LEAVE: "チャンネル退出",
     MessageType.INVITE: "メンバー招待",
     MessageType.KICK: "メンバー削除",
     # コマンドメッセージ
     MessageType.CMD_READ: "既読通知",
+    MessageType.CMD_DELIVERED: "配信確認",
     # 通知メッセージ
     MessageType.NOTIFICATION_MESSAGE: "テキスト通知",
     MessageType.NOTIFICATION_STICKER: "スタンプ通知",
@@ -81,7 +84,7 @@ MESSAGE_TYPE_NAMES: dict[int, str] = {
     MessageType.NOTIFICATION_SERVICE: "システム通知",
     MessageType.NOTIFICATION_EMOJI: "絵文字通知",
     MessageType.NOTIFICATION_IMAGE: "画像通知",
-    MessageType.NOTIFICATION_BADGE: "バッジ更新通知(未解析)",
+    MessageType.NOTIFICATION_BADGE: "バッジ更新通知",
 }
 
 

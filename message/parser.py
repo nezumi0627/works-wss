@@ -57,22 +57,28 @@ def _parse_notification(data: Dict[str, Any]) -> WorksMessage:
 
     Raises:
         ValueError: 必須フィールドが存在しない場合
-
-    Note:
-        nTypeとchNoは必須フィールドです。
     """
-    required_fields = {"nType", "chNo"}
-    if not required_fields.issubset(data.keys()):
-        raise ValueError("Missing required fields in notification data")
+    if "nType" not in data:
+        raise ValueError("Missing nType in notification data")
 
     msg_type = MessageType(data["nType"])
-    body: Dict[str, Any] = {}
+    body = data.copy()
+
+    # バッジ更新通知の場合は特別な処理は不要
+    if msg_type == MessageType.NOTIFICATION_BADGE:
+        return WorksMessage(
+            command=msg_type,
+            channel_id=str(data.get("userNo", "")),
+            body=body,
+        )
+
+    # その他の通知の場合は従来の処理
+    if "chNo" not in data:
+        raise ValueError("Missing chNo in notification data")
 
     if msg_type == MessageType.NOTIFICATION_STICKER and "stkInfo" in data:
         sticker = StickerInfo.from_dict(data["stkInfo"])
         body = sticker.to_dict()
-    else:
-        body = data
 
     return WorksMessage(
         command=msg_type,
