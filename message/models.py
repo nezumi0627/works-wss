@@ -43,6 +43,25 @@ class WorksMessage:
         Raises:
             ValueError: 必須フィールドが存在しない場合
         """
+        if "relayDataList" in data:
+            relay_data = data["relayDataList"][0]
+            cmd = relay_data.get("cmd")
+            if cmd is None:
+                raise ValueError("Missing cmd in relay data")
+
+            msg_type = None
+            body = relay_data.get("bdy", {})
+            if "msgTypeCode" in body:
+                msg_type = MessageType(body["msgTypeCode"])
+            else:
+                msg_type = MessageType(cmd)
+
+            return cls(
+                command=msg_type,
+                channel_id=str(relay_data.get("cid", "")),
+                body=body,
+            )
+
         missing_fields = [
             key for key in cls.REQUIRED_FIELDS if key not in data
         ]
