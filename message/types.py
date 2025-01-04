@@ -30,10 +30,14 @@ class MessageType(IntEnum):
 
     Attributes:
         NORMAL (101): テキストメッセージ
-        AWAY (102): 不在メッセージ(未解析)
+        AWAY (102): 不在メッセージ
         LEAVE (202): チャンネルからの退出通知
         INVITE (203): 新規メンバーの招待通知
         KICK (204): メンバーのキック通知
+        KICKED (117): キックされた通知
+        GROUP_INFO (94001): グループ情報更新
+        AWAY_STATUS (94002): 不在ステータス更新
+        KICK_STATUS (94005): キック状態更新
         CMD_READ (93004): 既読通知
         NOTIFICATION_MESSAGE (1): テキスト通知
         NOTIFICATION_STICKER (18): スタンプ通知
@@ -41,15 +45,21 @@ class MessageType(IntEnum):
         NOTIFICATION_SERVICE (100): システム通知
         NOTIFICATION_EMOJI (27): 絵文字通知
         NOTIFICATION_IMAGE (11): 画像通知
-        NOTIFICATION_BADGE (41): バッジ更新通知(未解析)
+        NOTIFICATION_BADGE (41): バッジ更新通知
     """
 
     # チャンネルメッセージタイプ
     NORMAL = 101
-    AWAY = 102  # TODO: 不在メッセージの詳細仕様を確認
+    AWAY = 102
     LEAVE = 202
     INVITE = 203
     KICK = 204
+    KICKED = 117
+
+    # システムメッセージタイプ
+    GROUP_INFO = 94001
+    AWAY_STATUS = 94002
+    KICK_STATUS = 94005
 
     # コマンドメッセージタイプ
     CMD_READ = 93004
@@ -61,27 +71,38 @@ class MessageType(IntEnum):
     NOTIFICATION_SERVICE = 100
     NOTIFICATION_EMOJI = 27
     NOTIFICATION_IMAGE = 11
-    NOTIFICATION_BADGE = 41  # TODO: バッジ更新通知の詳細仕様を確認
+    NOTIFICATION_BADGE = 41
 
 
 # メッセージタイプと表示名の対応マップ
 MESSAGE_TYPE_NAMES: dict[int, str] = {
     # チャンネルメッセージ
     MessageType.NORMAL: "テキストメッセージ",
-    MessageType.AWAY: "不在メッセージ(未解析)",
+    MessageType.AWAY: "不在メッセージ",
     MessageType.LEAVE: "チャンネル退出",
     MessageType.INVITE: "メンバー招待",
     MessageType.KICK: "メンバー削除",
+    MessageType.KICKED: "キックされた通知",
+    # システムメッセージ
+    MessageType.GROUP_INFO: "グループ情報更新",
+    MessageType.AWAY_STATUS: "不在ステータス更新",
+    MessageType.KICK_STATUS: "キック状態更新",
     # コマンドメッセージ
     MessageType.CMD_READ: "既読通知",
     # 通知メッセージ
     MessageType.NOTIFICATION_MESSAGE: "テキスト通知",
     MessageType.NOTIFICATION_STICKER: "スタンプ通知",
+    MessageType.NOTIFICATION_IMAGE: "画像通知",
     MessageType.NOTIFICATION_FILE: "ファイル通知",
     MessageType.NOTIFICATION_SERVICE: "システム通知",
     MessageType.NOTIFICATION_EMOJI: "絵文字通知",
     MessageType.NOTIFICATION_IMAGE: "画像通知",
-    MessageType.NOTIFICATION_BADGE: "バッジ更新通知(未解析)",
+    MessageType.NOTIFICATION_BADGE: "バッジ更新通知",
+    # コマンド
+    MessageType.CMD_READ: "既読通知",
+    MessageType.GROUP_INFO: "グループ情報更新",
+    MessageType.AWAY_STATUS: "不在ステータス更新",
+    MessageType.KICK_STATUS: "キック状態更新",
 }
 
 
@@ -101,7 +122,13 @@ def get_message_type_name(value: int) -> str:
     Returns:
         str: メッセージタイプの表示名
     """
-    return MESSAGE_TYPE_NAMES.get(value, f"不明なメッセージタイプ({value})")
+    try:
+        msg_type = MessageType(value)
+        return MESSAGE_TYPE_NAMES.get(
+            msg_type, f"不明なメッセージタイプ({value})"
+        )
+    except ValueError:
+        return f"不明なメッセージタイプ({value})"
 
 
 def get_channel_type_name(value: int) -> str:

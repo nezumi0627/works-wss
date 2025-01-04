@@ -244,13 +244,14 @@ class WMQTTClient:
             self.state = StatusFlag.CONNECTING
             logger.info(f"接続状態: {self.state.name}")
 
-            self.ws = await websockets.connect(
+            websocket = await websockets.connect(
                 self.ws_config.url,
                 ssl=ssl.create_default_context(),
                 additional_headers=self.headers,
                 subprotocols=[self.ws_config.subprotocol],
                 ping_interval=None,
             )
+            self.ws = cast(WebSocketClientProtocol, websocket)
             logger.info("WebSocket接続が確立されました")
 
             logger.info("-" * 50)
@@ -270,9 +271,7 @@ class WMQTTClient:
             logger.info("メッセージ監視を開始します")
             logger.info("-" * 50)
 
-            async with asyncio.TaskGroup() as tg:
-                tg.create_task(self._start_keepalive())
-                tg.create_task(self.listen())
+            await asyncio.gather(self._start_keepalive(), self.listen())
 
         except InvalidHandshake as err:
             self.state = StatusFlag.DISCONNECTED
@@ -340,6 +339,7 @@ class WMQTTClient:
                     )
         except ConnectionClosed as err:
             logger.error(f"WebSocket接続が切断されました: {err}")
+            raise
         except asyncio.CancelledError:
             logger.info("メッセージ監視タスクを終了します")
             raise
@@ -370,17 +370,6 @@ class WMQTTClient:
                 logger.debug(f"パケット: {packet.packet.hex(' ')}")
 
                 try:
-                    notification = json.loads(payload)
-                    logger.debug(
-                        f"データ: "
-                        f"{json.dumps(notification, ensure_ascii=False)}"
-                    )
-
-                    # 重複チェック
-                    if self._is_duplicate_message(notification):
-                        return
-
-                    # メッセージを処理
                     if message := parse_message(payload):
                         await self._route_message(topic, message)
 
@@ -408,6 +397,14 @@ class WMQTTClient:
                 await self._handle_notification(message)
             elif message.command == MessageType.CMD_READ:
                 await self._handle_read_receipt(message)
+            elif message.command == MessageType.GROUP_INFO:
+                await self._handle_group_info(message)
+            elif message.command == MessageType.AWAY_STATUS:
+                await self._handle_away_status(message)
+            elif message.command == MessageType.KICK_STATUS:
+                await self._handle_kick_status(message)
+            elif message.command == MessageType.KICKED:
+                await self._handle_kicked(message)
             elif "msgTypeCode" in message.body:
                 await self._handle_chat_message(message)
         except Exception as err:
@@ -416,6 +413,11 @@ class WMQTTClient:
     async def _handle_notification(self, message: WorksMessage) -> None:
         """通知メッセージを処理します."""
         msg_type = message.body.get("nType", 0)
+
+        if msg_type == MessageType.NOTIFICATION_BADGE:
+            await self._handle_badge_update(message)
+            return
+
         ch_type = message.body.get("chType", 0)
         ch_title = message.body.get("chTitle", "")
         status = message.body.get("sType", "不明")
@@ -482,12 +484,37 @@ class WMQTTClient:
         if msg_type == MessageType.NORMAL:
             logger.debug(f"テキスト内容: {message.body.get('content', '')}")
         elif msg_type == MessageType.LEAVE:
-            logger.debug(f"退出者: {message.body.get('userId', '')}")
-        elif msg_type == MessageType.INVITE:
-            logger.debug(
-                f"招待者: {message.body.get('inviter', '')}, "
-                f"招待されたユーザー: {message.body.get('invitee', '')}"
+            user_id = message.body.get("userId", "")
+            user_name = message.body.get("userName", "")
+            logger.info(
+                f"退出通知: {user_name} (ID: {user_id}) が "
+                f"チャンネル {message.channel_id} から退出しました"
             )
+        elif msg_type == MessageType.INVITE:
+            inviter = message.body.get("inviter", {})
+            invitee = message.body.get("invitee", {})
+            logger.info(
+                f"招待通知: {inviter.get('name', '')} が "
+                f"{invitee.get('name', '')} を "
+                f"チャンネル {message.channel_id} に招待しました"
+            )
+        elif msg_type == MessageType.KICKED:
+            kicked_user = message.body.get("kickedUser", {})
+            logger.info(
+                f"キック通知: {kicked_user.get('name', '')} が "
+                f"チャンネル {message.channel_id} からキックされました"
+            )
+            logger.debug(
+                f"キック詳細: ID={kicked_user.get('id', '')}, "
+                f"理由={kicked_user.get('reason', '')}"
+            )
+        elif msg_type == MessageType.AWAY:
+            user = message.body.get("user", {})
+            logger.info(
+                f"不在通知: {user.get('name', '')} が "
+                f"チャンネル {message.channel_id} で不在になりました"
+            )
+            logger.debug(f"不在理由: {message.body.get('reason', '')}")
 
     async def stop(self) -> None:
         """クライアントを停止します."""
@@ -508,7 +535,7 @@ class WMQTTClient:
         while self.running:
             try:
                 await asyncio.sleep(self.config.ping_interval)
-                if self.ws and not self.ws.closed:
+                if self.ws and not self.ws.close:
                     await self._send_pingreq()
             except (
                 WebSocketException,
@@ -604,6 +631,104 @@ class WMQTTClient:
         message_id = packet.get_message_id()
         if message_id in self._pending_messages:
             self._pending_messages[message_id].set_result(True)
+
+    async def _handle_group_info(self, message: WorksMessage) -> None:
+        """グループ情報更新を処理します."""
+        body = message.body
+        extras = json.loads(body.get("extras", "{}"))
+
+        logger.info(
+            f"グループ情報更新: チャンネル {message.channel_id} "
+            f"タイトル: {extras.get('title', '')}"
+        )
+
+        active_users = extras.get("activeUserList", [])
+        if active_users:
+            logger.info(f"メンバー数: {len(active_users)}")
+            logger.debug("アクティブユーザー:")
+            for user in active_users:
+                logger.debug(
+                    f"  {user.get('name', '')} "
+                    f"(ID: {user.get('id', '')}, "
+                    f"ドメイン: {user.get('domainId', '')})"
+                )
+
+        # 新規参加者の情報
+        if "inviter" in extras and extras["inviter"].get("id"):
+            inviter = extras["inviter"]
+            logger.info(
+                f"新規参加: 招待者 {inviter.get('name', '')} "
+                f"(ID: {inviter.get('id', '')})"
+            )
+
+    async def _handle_away_status(self, message: WorksMessage) -> None:
+        """不在ステータス更新を処理します."""
+        body = message.body
+        extras = json.loads(body.get("extras", "{}"))
+
+        away_users = extras.get("awayUserList", [])
+        if away_users:
+            logger.info(
+                f"不在ステータス更新: チャンネル {message.channel_id} "
+                f"不在ユーザー数: {extras.get('awayUserCount', 0)}"
+            )
+            logger.debug("不在ユーザー:")
+            for user in away_users:
+                logger.debug(
+                    f"  {user.get('name', '')} "
+                    f"(ID: {user.get('id', '')}, "
+                    f"理由: {user.get('reason', '')})"
+                )
+
+    async def _handle_kick_status(self, message: WorksMessage) -> None:
+        """キック状態更新を処理します."""
+        body = message.body
+        extras = json.loads(body.get("extras", "{}"))
+
+        kicked_user = extras.get("kickedUser", {})
+        if kicked_user:
+            logger.info(f"キック状態更新: チャンネル {message.channel_id}")
+            logger.debug(
+                f"キックされたユーザー: {kicked_user.get('name', '')} "
+                f"(ID: {kicked_user.get('id', '')}, "
+                f"ドメイン: {kicked_user.get('domainId', '')}, "
+                f"理由: {kicked_user.get('reason', '')})"
+            )
+
+    async def _handle_kicked(self, message: WorksMessage) -> None:
+        """キックされた通知を処理します."""
+        body = message.body
+        extras = json.loads(body.get("extras", "{}"))
+
+        kicked_user = extras.get("kickedUser", {})
+        if kicked_user:
+            logger.info(
+                f"キックされた通知: チャンネル {message.channel_id} "
+                f"ユーザー: {kicked_user.get('name', '')}"
+            )
+            logger.debug(
+                f"詳細: ID={kicked_user.get('id', '')}, "
+                f"ドメイン={kicked_user.get('domainId', '')}, "
+                f"理由={kicked_user.get('reason', '')}"
+            )
+
+    async def _handle_badge_update(self, message: WorksMessage) -> None:
+        """バッジ更新通知を処理します."""
+        body = message.body
+        logger.info(
+            f"バッジ更新: "
+            f"ドメイン {body.get('domain_id', '')}, "
+            f"ユーザー {body.get('userNo', '')}"
+        )
+        logger.debug(
+            f"バッジ詳細: "
+            f"badge={body.get('badge', 0)}, "
+            f"cBadge={body.get('cBadge', 0)}, "
+            f"aBadge={body.get('aBadge', 0)}, "
+            f"mBadge={body.get('mBadge', 0)}, "
+            f"hBadge={body.get('hBadge', 0)}, "
+            f"wpaBadge={body.get('wpaBadge', 0)}"
+        )
 
 
 async def main() -> None:
