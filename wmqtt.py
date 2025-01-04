@@ -244,13 +244,14 @@ class WMQTTClient:
             self.state = StatusFlag.CONNECTING
             logger.info(f"接続状態: {self.state.name}")
 
-            self.ws = await websockets.connect(
+            websocket = await websockets.connect(
                 self.ws_config.url,
                 ssl=ssl.create_default_context(),
                 additional_headers=self.headers,
                 subprotocols=[self.ws_config.subprotocol],
                 ping_interval=None,
             )
+            self.ws = cast(WebSocketClientProtocol, websocket)
             logger.info("WebSocket接続が確立されました")
 
             logger.info("-" * 50)
